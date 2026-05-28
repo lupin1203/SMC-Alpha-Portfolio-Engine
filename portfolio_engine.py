@@ -273,15 +273,44 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
             bm_df = bm_df.reset_index()
 
     total_trades = len(portfolio_df)
-    win_rate = len(portfolio_df[portfolio_df['真實R'] > 0]) / total_trades if total_trades > 0 else 0
-    avg_w = portfolio_df[portfolio_df['真實R'] > 0]['真實R'].mean() if win_rate > 0 else 0
-    avg_l = abs(portfolio_df[portfolio_df['真實R'] < 0]['真實R'].mean()) if win_rate < 1 else 1
+    
+    if total_trades > 0:
+        win_rate = len(portfolio_df[portfolio_df['真實R'] > 0]) / total_trades
+        avg_w = portfolio_df[portfolio_df['真實R'] > 0]['真實R'].mean() if win_rate > 0 else 0
+        avg_l = abs(portfolio_df[portfolio_df['真實R'] < 0]['真實R'].mean()) if win_rate < 1 else 1
+        
+        # 1. 獲利因子 (Profit Factor) = 總毛利 / 總毛損
+        gross_profit = portfolio_df[portfolio_df['絕對損益'] > 0]['絕對損益'].sum()
+        gross_loss = abs(portfolio_df[portfolio_df['絕對損益'] < 0]['絕對損益'].sum())
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        
+        # 2. 平均 R 倍數 (Average R multiple)
+        avg_r = portfolio_df['真實R'].mean()
+        
+        # 3. 投資組合夏普比率 (Sharpe Ratio)
+        # 建立真實的日淨值曲線來精準計算組合夏普
+        daily_equity = portfolio_df.groupby('出場日期')['交易後總淨值'].last()
+        if not daily_equity.empty and len(daily_equity) > 1:
+            idx = pd.date_range(daily_equity.index.min(), daily_equity.index.max())
+            daily_equity = daily_equity.reindex(idx, method='ffill')
+            daily_returns = daily_equity.pct_change().dropna()
+            daily_vol = daily_returns.std()
+            sharpe_ratio = (daily_returns.mean() / daily_vol) * np.sqrt(252) if daily_vol > 0 else 0.0
+        else:
+            sharpe_ratio = 0.0
+            
+    else:
+        win_rate, avg_w, avg_l, avg_r, profit_factor, sharpe_ratio = 0, 0, 0, 0, 0, 0
+
     
     stats = {
         "總交易次數": total_trades,
-        "風控與資金不足淘汰次數": len(raw_portfolio_df) - total_trades,
-        "勝率": round(win_rate * 100, 2),
+        "風控與資金不足淘汰次數": len(raw_portfolio_df) - total_trades if 'raw_portfolio_df' in locals() else 0,
+        "勝率(%)": round(win_rate * 100, 2),
         "Portfolio期望值(R)": round((win_rate * avg_w) - ((1 - win_rate) * avg_l), 2),
+        "平均R倍數": round(avg_r, 2),
+        "獲利因子(PF)": round(profit_factor, 2) if profit_factor != float('inf') else "無限大",
+        "夏普值(Sharpe)": round(sharpe_ratio, 2),
         "真實總報酬(%)": round(final_return_pct, 2),
         "期末總淨值(NTD)": round(realized_equity, 0),
         "真實最大回撤(%)": round(max_dd_pct, 2)
@@ -291,5 +320,11 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         stats["真實總報酬(%)"] = -100.0
         stats["期末總淨值(NTD)"] = 0
         stats["Portfolio期望值(R)"] = "破產歸零"
+        stats["夏普值(Sharpe)"] = "破產"
+        stats["獲利因子(PF)"] = 0.0
+    
+    print("\n🔍 [DEBUG 終端機回報] 算出來的 Stats 字典是:")
+    print(stats)
+    print("===============================\n")
     
     return portfolio_df, stats, bm_df
