@@ -27,6 +27,10 @@
 * **最大回撤 (MDD)：** -39.15%
 * **破產歸零機率 (Monte Carlo)：**在目前模擬條件下，未觀察到歸零案例。
 * **總交易次數：** 928 次
+* **夏普比:**0.58
+* **勝率:**14.6
+* **Profit Factor:**1.37
+* **平均R倍數:**1.15R
 <img width="3048" height="1494" alt="newplot (3)" src="https://github.com/user-attachments/assets/20f74b7c-f12f-42d5-9054-49813e7786df" />
 ---
 
@@ -49,3 +53,16 @@
 **【肥尾效應 (Fat Tail) 與系統魯棒性】**
 在大規模歷史模擬回測中，獲利分佈呈現顯著的右偏（肥尾效應）。為避免策略過度擬合 (Overfitting) 或依賴特定歷史路徑，本系統導入了蒙地卡羅重抽樣 (Bootstrap Resampling)。透過將歷史交易序列隨機打亂並執行上萬次壓力測試，數據顯示在 95% 置信區間下，即便系統遭遇 -63.44% 的極端回撤，在目前模擬條件下，蒙地卡羅模擬中未觀察到歸零案例。這顯示了在嚴謹的部位控管 (Position Sizing) 下，系統具備承受長期市場波動的韌性，並能有效捕捉尾部風險帶來的超額報酬。
 <img width="3048" height="1494" alt="newplot (7)" src="https://github.com/user-attachments/assets/e671f019-ccef-4c2d-ae4e-eb10ad2c8310" />
+研究限制與未來方向
+
+目前系統仍以日 K 資料進行模擬，尚未納入 Tick-level execution、Order Book microstructure 與 Intraday liquidity modeling 等高頻市場結構因素。
+
+未來希望進一步研究：
+
+Regime Detection
+
+因子穩定性分析
+
+Machine Learning based parameter optimization
+
+多資產配置與動態風控模型
