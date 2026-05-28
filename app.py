@@ -7,10 +7,7 @@ import concurrent.futures
 import logging
 import requests
 import datetime
-
-# 🌟 網頁設定拉到最頂端
 st.set_page_config(page_title="SMC 量化拷問終端 V19.0", layout="wide")
-
 # --- 新增工具函數 ---
 def safe_divide(a, b):
     """避免除以零錯誤的安全除法"""
@@ -18,7 +15,6 @@ def safe_divide(a, b):
         return a / b
     except ZeroDivisionError:
         return 0
-
 def send_telegram_async(msg):
     """非同步發送 Telegram 訊息 (啟用額外執行緒)"""
     import threading
@@ -47,17 +43,25 @@ from database import init_db, save_backtest_record, load_history, save_backtest_
 from monte_carlo import run_monte_carlo
 from portfolio_engine import run_portfolio_backtest
 
-# 🌟 核心升級：精準對齊 kwargs，讓選配參數安全送達底層
+# 對齊 kwargs，讓選配參數安全送達底層
 @st.cache_data(ttl=3600)
-def get_cached_portfolio_results(tickers, years, mode, val, gap, sma, vol, atr, bos, slip, fee, minv, maxp, maxs, smap, risk, cap, account_dd):
-    return run_portfolio_backtest(
-        tickers=tickers, years=years, bt_mode=mode, bt_val=val, gap_pct=gap, use_sma=sma,
-        use_vol_filter=vol, use_atr_filter=atr, use_bos_filter=bos,  # 精準對應 strategy.py 的命名
-        slippage_pct=slip, fee_disc=fee, min_vol=minv, 
-        max_concurrent=maxp, max_per_sector=maxs, sector_map=smap, 
-        risk_pct=risk, initial_capital=cap, account_dd_limit=account_dd
-    )
-
+def get_cached_portfolio_results(*args, **kwargs):
+    # 1. 支援 Tab 3 的舊版寫法 (傳入整整 18 個位置參數)
+    if len(args) == 18:
+        return run_portfolio_backtest(
+            tickers=args[0], years=args[1], bt_mode=args[2], bt_val=args[3], gap_pct=args[4], use_sma=args[5],
+            use_vol_filter=args[6], use_atr_filter=args[7], use_bos_filter=args[8],
+            slippage_pct=args[9], fee_disc=args[10], min_vol=args[11], 
+            max_concurrent=args[12], max_per_sector=args[13], sector_map=args[14], 
+            risk_pct=args[15], initial_capital=args[16], account_dd_limit=args[17]
+        )
+    # 2. 支援 Heatmap 或自訂腳本的新寫法 (使用 bt_mode=... 等關鍵字參數)
+    else:
+        if 'use_vol' in kwargs: kwargs['use_vol_filter'] = kwargs.pop('use_vol')
+        if 'use_atr' in kwargs: kwargs['use_atr_filter'] = kwargs.pop('use_atr')
+        if 'use_bos' in kwargs: kwargs['use_bos_filter'] = kwargs.pop('use_bos')
+        
+        return run_portfolio_backtest(*args, **kwargs)
 # 初始化資料庫
 init_db()
 INDUSTRY_DICT, STOCK_NAMES, SEARCH_LIST = load_data()
@@ -73,7 +77,7 @@ TELEGRAM_CHAT_ID ='7779789363'
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["即時掃描雷達", "深度回測實驗室", "投資組合回測 (Portfolio)", "歷史戰績資料庫", "防禦與衰減檢定"])
 
 # ==========================================
-# 🌟 分頁 1：即時掃描雷達
+#  分頁 1：掃描雷達
 # ==========================================
 with tab1:
     st.header("SMC 動能掃描雷達")
@@ -134,7 +138,7 @@ with tab1:
                     if df is None or df.empty or len(df) < 65:
                         continue
                         
-                    # 🌟 參數同步：將雷達 UI 設定傳給核心大腦
+                    #  參數同步：將雷達 UI 設定傳給核心大腦
                     df_logic = apply_smc_logic(
                         df.copy(), 
                         min_gap_pct=r_gap, 
@@ -216,7 +220,7 @@ with tab1:
             st.warning(f"今日收盤無符合嚴格條件的標的。今日空手，享受生活保護資金！")
 
 # ==========================================
-# 🌟 分頁 2：單股深度回測實驗室
+#  分頁 2：單股深度回測實驗室
 # ==========================================
 with tab2:
     st.header("科學化回測實驗室 (單股)")
@@ -286,7 +290,7 @@ with tab2:
             st.info("交易次數不足，無法執行蒙地卡羅模擬。")
 
 # ==========================================
-# 🌟 分頁 3：投資組合 Alpha 驗證引擎
+#  分頁 3：投資組合 Alpha 驗證引擎
 # ==========================================
 with tab3:
     st.header("投資組合 Alpha 驗證引擎 (機構級)")
@@ -307,12 +311,12 @@ with tab3:
         p_gap = st.number_input("最小缺口(%)", value=0.0, step=0.1, key="pgap_num")
         p_sma = st.checkbox("季線濾網", value=True, key="psma_chk")
         
-        st.markdown("###### 🎛️ SMC 嚴格選配模組")
+        st.markdown("######  SMC 嚴格選配模組")
         p_vol = st.checkbox("要求起漲爆量", value=False, key="pvol_chk")
         p_atr = st.checkbox("強勢實體位移", value=False, key="patr_chk")
         p_bos = st.checkbox("突破近期新高", value=False, key="pbos_chk")
         
-        run_portfolio = st.button("🚀 執行組合驗證", type="primary", use_container_width=True)
+        run_portfolio = st.button(" 執行組合驗證", type="primary", use_container_width=True)
 
     with p_col2:
         if run_portfolio:
@@ -338,10 +342,10 @@ with tab3:
                         st.session_state['bm_df'] = bm_df
                         st.session_state['p_cap'] = p_cap
                     else:
-                        st.error("❌ 引擎未觸發交易。請嘗試調低「最小缺口」或取消勾選「嚴格選配模組」。")
+                        st.error(" 引擎未觸發交易。請嘗試調低「最小缺口」或取消勾選「嚴格選配模組」。")
 
     # ==========================================
-    # 🌟 將報表呈現區移出側邊欄，享受全螢幕寬度！
+    #  將報表呈現區移出側邊欄，享受全螢幕寬度！
     # ==========================================
     if 'p_df' in st.session_state and not st.session_state['p_df'].empty:
         p_df = st.session_state['p_df']
@@ -350,7 +354,7 @@ with tab3:
         p_cap_state = st.session_state.get('p_cap', 1000000)  # 修正 NameError：安全提取本金
         
         st.divider()
-        st.markdown(f"### 📈 投資組合綜合績效報表 (初始本金：NT$ {p_cap_state:,})")
+        st.markdown(f"###  投資組合綜合績效報表 (初始本金：NT$ {p_cap_state:,})")
         
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("期末總淨值", f"NT$ {p_stats['期末總淨值(NTD)']:,}")
@@ -375,7 +379,7 @@ with tab3:
         st.plotly_chart(fig_p, use_container_width=True)
         
         st.divider()
-        st.markdown("### 🕵️‍♂️ 避險基金級深度診斷 (Hedge Fund Analytics)")
+        st.markdown("###  避險基金級深度診斷 (Hedge Fund Analytics)")
         
         fig_dd = px.area(p_df, x='出場日期', y='真實回撤(%)', title='水下回撤曲線 (Underwater Curve)', height=300)
         fig_dd.update_traces(fillcolor='rgba(255, 0, 0, 0.3)', line=dict(color='red', width=1))
@@ -399,17 +403,17 @@ with tab3:
         fig_year.update_layout(template="plotly_dark", yaxis_title='利潤 (NTD)')
         st.plotly_chart(fig_year, use_container_width=True)
 
-        with st.expander("🔍 查看這 5 筆極端值交易明細"):
+        with st.expander(" 查看這 5 筆極端值交易明細"):
             st.dataframe(top_5_trades[['日期', '出場日期', '標的', '板塊', 'Regime', '真實R', '絕對損益']], hide_index=True)
 
         st.divider()
-        st.markdown("#### 🎲 蒙地卡羅破產模擬 (真・複利版)")
+        st.markdown("####  蒙地卡羅破產模擬 (真・複利版)")
         st.caption("將歷史交易順序打亂重抽，並以真實複利(Compounding)計算淨值，測試連虧地獄。")
         
         trade_results = p_df['真實R'].tolist()
         
         if len(trade_results) < 20:
-            st.warning("⚠️ 實際交易樣本數低於 20 筆，執行蒙地卡羅模擬易產生「統計幻覺」，已自動攔截。建議放寬策略參數。")
+            st.warning(" 實際交易樣本數低於 20 筆，執行蒙地卡羅模擬易產生「統計幻覺」，已自動攔截。建議放寬策略參數。")
         else:
             num_simulations = 1000
             sim_lengths = len(trade_results)
@@ -484,7 +488,7 @@ with tab5:
     st.subheader("1. Alpha 衰減檢定 (Walk-Forward Alpha Decay)")
     st.markdown("真正的優勢(Alpha)不該像冰塊一樣快速融化。我們將檢視策略在過去 10 年間，每年的**期望值(R)**與**勝率**是否保持平穩。")
     
-    # 🌟 透過 session_state 讀取資料，不再受限於 Tab 切換重整問題！
+    #  透過 session_state 讀取資料，不再受限於 Tab 切換重整問題！
     if 'p_df' in st.session_state and not st.session_state['p_df'].empty:
         decay_df = st.session_state['p_df'].copy()
         decay_df['年份'] = pd.to_datetime(decay_df['出場日期']).dt.year
@@ -566,13 +570,27 @@ with tab5:
                     for r_val in rr_list:
                         # 🌟 核心升級：呼叫快取版多進程引擎，飛速掃描！
                         h_df, h_stats, _ = get_cached_portfolio_results(
-                            tickers=r_tickers, years=10, bt_mode="移動停利", bt_val=r_val, gap_pct=g_val, 
-                            use_sma=True, slippage_pct=0.1, fee_disc=0.28, min_vol=1000, 
-                            max_concurrent=5, max_per_sector=2, sector_map=sector_map, 
-                            risk_pct=0.02, initial_capital=1000000.0
+                            tickers=r_tickers, 
+                            years=10, 
+                            bt_mode="移動停利", 
+                            bt_val=r_val, 
+                            gap_pct=g_val, 
+                            use_sma=True, 
+                            use_vol_filter=False, # 補上選配開關避免報錯
+                            use_atr_filter=False,
+                            use_bos_filter=False,
+                            slippage_pct=0.002,   # ✅ 修正：0.2% 的合理滑價
+                            fee_disc=0.28, 
+                            min_vol=1000, 
+                            max_concurrent=5, 
+                            max_per_sector=2, 
+                            sector_map=sector_map, 
+                            risk_pct=2.0,         # ✅ 修正：2.0 代表 2% 單筆風險
+                            initial_capital=1000000.0,
+                            account_dd_limit=0.20 # ✅ 補上帳戶停機線防呆
                         )
                         
-                        if h_stats and not h_df.empty and h_stats["真實總報酬(%)"] != -100.0:
+                        if h_stats and not h_df.empty and h_stats.get("真實總報酬(%)", -100.0) != -100.0:
                             exp_val = h_stats["Portfolio期望值(R)"]
                         else:
                             exp_val = -1.0 
@@ -607,4 +625,5 @@ with tab5:
                 st.plotly_chart(fig_hm, use_container_width=True)
                 
                 st.info("💡 **如何判讀熱力圖 (Robustness)：**\n如果你的 10 RR 與 0.3 Gap 是深綠色，但旁邊的 12 RR 卻突然變成深紅色，這代表你的策略是【過度最佳化】的孤峰，實盤必死。真正的聖杯應該是一整片顏色相近的**綠色高原**！")
+                
                 #streamlit run app.py
