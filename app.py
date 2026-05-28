@@ -356,13 +356,32 @@ with tab3:
         st.divider()
         st.markdown(f"###  投資組合綜合績效報表 (初始本金：NT$ {p_cap_state:,})")
         
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("期末總淨值", f"NT$ {p_stats['期末總淨值(NTD)']:,}")
-        m2.metric("最大回撤", f"-{p_stats['真實最大回撤(%)']}%")
-        m3.metric("總成交", f"{p_stats['總交易次數']} 次")
-        m4.metric("淘汰次數", f"{p_stats['風控與資金不足淘汰次數']} 次")
-        m5.metric("期望值", f"{p_stats['Portfolio期望值(R)']} R")
+        #  第一層：資金與風險宏觀指標 (Macro KPIs)
+        st.markdown("#####  帳戶宏觀指標 (Macro KPIs)")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("期末總淨值", f"NT$ {p_stats.get('期末總淨值(NTD)', 0):,}")
+        m2.metric("真實總報酬", f"{p_stats.get('真實總報酬(%)', 0)} %")
+        m3.metric("最大回撤 (MDD)", f"-{p_stats.get('真實最大回撤(%)', 0)} %")
         
+        # 夏普值根據好壞給予顏色提示
+        sharpe_val = p_stats.get('夏普值(Sharpe)', 0)
+        sharpe_str = str(sharpe_val)
+        if isinstance(sharpe_val, (int, float)):
+            if sharpe_val >= 1.5: sharpe_str += " (極佳)"
+            elif sharpe_val >= 1.0: sharpe_str += " (優秀)"
+        m4.metric("夏普比率 (Sharpe)", sharpe_str)
+        
+        st.write("") # 增加一點間距
+        
+        # 第二層：微觀交易品質指標 (Trade Quality)
+        st.markdown("#####  交易品質指標 (Trade Quality)")
+        t1, t2, t3, t4, t5 = st.columns(5)
+        t1.metric("勝率 (Win Rate)", f"{p_stats.get('勝率(%)', 0)} %")
+        t2.metric("獲利因子 (Profit Factor)", f"{p_stats.get('獲利因子(PF)', 0)}")
+        t3.metric("系統期望值 (Exp)", f"{p_stats.get('Portfolio期望值(R)', 0)} R")
+        t4.metric("平均 R 倍數", f"{p_stats.get('平均R倍數', 0)} R")
+        t5.metric("總成交 / 淘汰", f"{p_stats.get('總交易次數', 0)} / {p_stats.get('風控與資金不足淘汰次數', 0)}")
+
         st.subheader(f"資金曲線對決：SMC 策略 vs 0050 大盤")
         fig_p = go.Figure()
         
@@ -625,5 +644,3 @@ with tab5:
                 st.plotly_chart(fig_hm, use_container_width=True)
                 
                 st.info("💡 **如何判讀熱力圖 (Robustness)：**\n如果你的 10 RR 與 0.3 Gap 是深綠色，但旁邊的 12 RR 卻突然變成深紅色，這代表你的策略是【過度最佳化】的孤峰，實盤必死。真正的聖杯應該是一整片顏色相近的**綠色高原**！")
-                
-                #streamlit run app.py
