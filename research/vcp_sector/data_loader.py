@@ -80,28 +80,66 @@ def load_stock_info(cfg: DataConfig = DEFAULT_CONFIG.data, use_api: bool = True)
 
     優先順序：本模組快取 → FinMind ``TaiwanStockInfo`` → 既有 ``stock_list.csv``。
     """
-    cache = cfg.cache_dir / "stock_info.parquet"
+    # v2：保留 FinMind 原始多列（一檔可能同時列在「電子工業」與細產業），再由 resolve 決定
+    cache = cfg.cache_dir / "stock_info_raw_v2.parquet"
     info = pd.DataFrame()
+    raw = pd.DataFrame()
     if cache.exists():
-        info = pd.read_parquet(cache)
+        raw = pd.read_parquet(cache)
     elif use_api:
         raw = _finmind_get("TaiwanStockInfo", cfg)
         if not raw.empty:
-            info = raw[
-                ["stock_id", "stock_name", "industry_category"]
-            ].drop_duplicates("stock_id", keep="last")
+            keep = [c for c in ("stock_id", "stock_name", "industry_category", "type", "date") if c in raw]
+            raw = raw[keep]
             cache.parent.mkdir(parents=True, exist_ok=True)
-            info.to_parquet(cache)
+            raw.to_parquet(cache)
+    if raw.empty and (cfg.cache_dir / "stock_info.parquet").exists():
+        # 舊版快取（每檔只剩一列，部分可能是「電子工業」大類）；聊勝於無，並提示更新
+        raw = pd.read_parquet(cfg.cache_dir / "stock_info.parquet")
+        logger.warning("使用舊版產業分類快取；FinMind 可連線時會自動改用 v2（含細產業）")
+    if not raw.empty:
+        info = resolve_industry(raw)
 
     if info.empty and cfg.stock_list_csv.exists():
         csv = pd.read_csv(cfg.stock_list_csv, encoding="utf-8-sig")
         info = pd.DataFrame({
             "stock_id": csv["ticker"].astype(str).str.split(".").str[0],
             "stock_name": csv["name"],
-            "industry_category": csv["category"].replace(TWSE_NEW_CATEGORIES),
+            "industry_category": csv["category"].map(normalize_category),
+            "type": "twse",
         })
 
     return filter_security_type(info, cfg)
+
+
+# FinMind 的大類（同一檔通常另有細產業列）；有細產業時不用這些
+BROAD_CATEGORIES = {"電子工業", "電子類", "其他"}
+
+
+def normalize_category(cat: str) -> str:
+    """統一上市 / 上櫃命名差異：去掉結尾的「業」「類」，並套用少數別名。"""
+    c = str(cat).strip()
+    c = TWSE_NEW_CATEGORIES.get(c, c)
+    c = c.replace("電腦及週邊設備", "電腦及週邊")
+    if c.endswith("類") and len(c) > 2:
+        c = c[:-1]
+    # 「半導體業」→「半導體」，但「水泥工業」「觀光事業」等「X業」是名詞本身，不動
+    if c.endswith("業") and len(c) > 2 and c[-2] not in "工事農商產企":
+        c = c[:-1]
+    return c
+
+
+def resolve_industry(raw: pd.DataFrame) -> pd.DataFrame:
+    """一檔多列 → 一列：優先細產業（非 BROAD_CATEGORIES），同層級取最新 date；產業名稱正規化。"""
+    df = raw.copy()
+    df["stock_id"] = df["stock_id"].astype(str)
+    df["industry_category"] = df["industry_category"].fillna("").astype(str)
+    df["_broad"] = df["industry_category"].isin(BROAD_CATEGORIES) | (df["industry_category"] == "")
+    sort_cols = ["stock_id", "_broad"] + (["date"] if "date" in df else [])
+    asc = [True, False] + ([True] if "date" in df else [])
+    df = df.sort_values(sort_cols, ascending=asc).drop_duplicates("stock_id", keep="last")
+    df["industry_category"] = df["industry_category"].map(normalize_category)
+    return df.drop(columns=["_broad"] + (["date"] if "date" in df else [])).reset_index(drop=True)
 
 
 def filter_security_type(info: pd.DataFrame, cfg: DataConfig = DEFAULT_CONFIG.data) -> pd.DataFrame:
@@ -111,7 +149,9 @@ def filter_security_type(info: pd.DataFrame, cfg: DataConfig = DEFAULT_CONFIG.da
     sid = info["stock_id"].astype(str)
     is_common = sid.str.fullmatch(r"[1-9]\d{3}")
     bad_cat = info["industry_category"].isin(cfg.excluded_categories)
-    return info[is_common & ~bad_cat].reset_index(drop=True)
+    # 興櫃（emerging）流動性差、Yahoo 多半沒有資料，不納入
+    bad_type = info["type"].isin(cfg.excluded_types) if "type" in info else False
+    return info[is_common & ~bad_cat & ~bad_type].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------

@@ -117,3 +117,20 @@ def test_strong_turn_events():
                        "group": "G", "is_strong": [False, True, True, False, True]})
     ev = strong_turn_events(df)
     assert ev["date"].tolist() == [df["date"][1], df["date"][4]]
+
+
+def test_resolve_industry_prefers_specific_and_normalizes():
+    from research.vcp_sector.data_loader import resolve_industry, normalize_category
+    raw = pd.DataFrame({
+        "stock_id": ["2330", "2330", "6488", "6488", "1101", "9999"],
+        "stock_name": ["台積電", "台積電", "環球晶", "環球晶", "台泥", "x"],
+        "industry_category": ["半導體業", "電子工業", "電子工業", "半導體業", "水泥工業", "電子工業"],
+        "type": ["twse", "twse", "tpex", "tpex", "twse", "tpex"],
+        "date": ["2024-01-01"] * 6,
+    })
+    out = resolve_industry(raw).set_index("stock_id")["industry_category"]
+    assert out["2330"] == "半導體" and out["6488"] == "半導體"     # 上市上櫃同一族群
+    assert out["1101"] == "水泥工業" and out["9999"] == "電子工業"  # 只有大類時才用大類
+    assert normalize_category("電腦及週邊設備業") == normalize_category("電腦及週邊業") == "電腦及週邊"
+    assert normalize_category("未分類 (35)") == "綠能環保"
+    assert normalize_category("數位雲端類") == "數位雲端"

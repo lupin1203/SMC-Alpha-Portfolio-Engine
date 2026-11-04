@@ -34,6 +34,7 @@ class DataConfig:
     min_listed_days: int = 250            # 截至當日的交易日數 >= 250 才納入
     turnover_window: int = 20             # 日均成交值的計算窗
     min_avg_turnover: float = 20_000_000  # 日均成交值門檻（新台幣）
+    excluded_types: tuple = ("emerging",)  # FinMind TaiwanStockInfo.type：twse / tpex / emerging
     # FinMind TaiwanStockInfo 中要剔除的 industry_category
     excluded_categories: tuple = (
         "ETF", "ETN", "上櫃指數股票型基金(ETF)", "指數投資證券(ETN)",
@@ -67,6 +68,32 @@ class LeadLagConfig:
 
 
 @dataclass(frozen=True)
+class VCPConfig:
+    """VCP 辨識參數（事先固定）。"""
+    min_swing_pct: float = 0.04       # ZigZag 反轉門檻
+    # 1. 前置趨勢（Trend Template 簡化版）
+    ma_fast: int = 50
+    ma_mid: int = 150
+    ma_slow: int = 200
+    ma_slow_rising_days: int = 20     # MA200 需高於 20 日前
+    max_below_52w_high: float = 0.25  # 距 52 週高點 <= 25%
+    min_above_52w_low: float = 0.30   # 距 52 週低點 >= 30%
+    # 2. 收縮結構
+    lookback: int = 120               # 整理起點（最高 swing high）需在近 120 日內
+    min_contractions: int = 2
+    max_contractions: int = 4
+    contraction_ratio: float = 0.8    # 每段深度 <= 前一段 × 0.8
+    max_first_depth: float = 0.35
+    max_last_depth: float = 0.10
+    # 3. 量縮
+    vol_dry_ratio: float = 0.7        # 最後一段均量 < 整理前 50 日均量 × 0.7
+    pre_base_vol_days: int = 50
+    # 5. 突破
+    breakout_vol_mult: float = 1.5    # 當日量 > 前 50 日均量 × 1.5
+    breakout_vol_days: int = 50
+
+
+@dataclass(frozen=True)
 class TradeConfig:
     """進出場規則：事先固定，不做優化。"""
     stop_lookback: int = 10          # 停損 = 訊號日（含）前 10 日最低價（訊號 B 用；VCP 會用自己的 stop）
@@ -92,9 +119,12 @@ class WalkForwardConfig:
     is_years: int = 3
     oos_years: int = 1
     min_is_trades: int = 30          # IS 交易數不足的參數組不選
-    # 敏感度 / walk-forward 的小範圍網格（族群門檻）
+    # 敏感度 / walk-forward 的小範圍網格（訊號 B：族群門檻）
     grid_pct_above_ma20: tuple = (0.5, 0.6, 0.7)
     grid_rank: tuple = (0.6, 0.7, 0.8)
+    # 訊號 A / C：VCP 參數
+    grid_min_swing_pct: tuple = (0.03, 0.04, 0.05)
+    grid_vol_dry_ratio: tuple = (0.6, 0.7, 0.8)
     n_random_baseline: int = 20
 
 
@@ -103,6 +133,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     sector: SectorConfig = field(default_factory=SectorConfig)
     leadlag: LeadLagConfig = field(default_factory=LeadLagConfig)
+    vcp: VCPConfig = field(default_factory=VCPConfig)
     trade: TradeConfig = field(default_factory=TradeConfig)
     wf: WalkForwardConfig = field(default_factory=WalkForwardConfig)
 

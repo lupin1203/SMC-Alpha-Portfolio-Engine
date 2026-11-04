@@ -230,26 +230,38 @@ def equity_stats(eq: pd.Series) -> pd.Series:
 # 隨機進場 baseline
 # ---------------------------------------------------------------------------
 def random_baseline(panel: StockPanel, signals: pd.DataFrame, tcfg: TradeConfig = DEFAULT_CONFIG.trade,
-                    n_runs: int = 20, seed: int = 0) -> pd.DataFrame:
-    """同一天、同樣筆數，改從「當日全市場可交易股」隨機抽，套用完全相同的停損 / 出場規則。"""
+                    n_runs: int = 20, seed: int = 0, stop_mode: str = "lowest_low") -> pd.DataFrame:
+    """同一天、同樣筆數，改從「當日全市場可交易股」隨機抽，套用完全相同的出場規則。
+
+    stop_mode：
+    - "lowest_low"：隨機股的停損 = 該股 10 日最低價（與訊號 B 相同的規則）
+    - "same_pct"：隨機股的停損距離（相對訊號日收盤）= 原訊號的停損距離（VCP 用，停損通常很緊）
+    """
     rng = np.random.default_rng(seed)
     stop_np = lowest_low_stop(panel, tcfg.stop_lookback).to_numpy()
+    close_np = panel.close.to_numpy()
     elig_np = panel.eligible.to_numpy()
     stocks = np.asarray(panel.stocks)
-    counts = signals.groupby(["signal_date", "variant"]).size()
+    groups = []
+    for (d, variant), g in signals.groupby(["signal_date", "variant"]):
+        i = panel.row.get(d)
+        if i is None:
+            continue
+        cj = [panel.col[x] for x in g["stock_id"]]
+        pct = 1 - g["stop_price"].to_numpy() / close_np[i, cj]
+        groups.append((d, variant, i, pct))
     rows = []
     for run in range(n_runs):
         picks = []
-        for (d, variant), k in counts.items():
-            i = panel.row.get(d)
-            if i is None:
-                continue
+        for d, variant, i, pct in groups:
             pool = np.flatnonzero(elig_np[i])
             if len(pool) == 0:
                 continue
-            for j in rng.choice(pool, size=min(k, len(pool)), replace=False):
+            chosen = rng.choice(pool, size=min(len(pct), len(pool)), replace=False)
+            for j, p in zip(chosen, pct):
+                stop = stop_np[i, j] if stop_mode == "lowest_low" else close_np[i, j] * (1 - p)
                 picks.append({"signal_date": d, "stock_id": stocks[j], "group": "random",
-                              "variant": variant, "stop_price": stop_np[i, j]})
+                              "variant": variant, "stop_price": stop})
         tr = simulate_trades(panel, pd.DataFrame(picks), tcfg)
         for variant, g in tr.groupby("variant"):
             rows.append({"run": run, "variant": variant, "n": len(g), "avg_r": g["r"].mean(),
@@ -261,7 +273,7 @@ def random_baseline(panel: StockPanel, signals: pd.DataFrame, tcfg: TradeConfig 
 # 敏感度 + walk-forward
 # ---------------------------------------------------------------------------
 def grid_trades(panel, strength, groups, cfg: Config = DEFAULT_CONFIG) -> dict[tuple, pd.DataFrame]:
-    """對族群門檻小網格，各自產生訊號 B 並模擬。key = (pct_above_ma20, rank)。"""
+    """訊號 B：對族群門檻小網格，各自產生訊號並模擬。key = (pct_above_ma20, rank)。"""
     out = {}
     cache: dict = {}   # (date, group) → (leaders, laggards)，與門檻無關，網格共用
     for pa in cfg.wf.grid_pct_above_ma20:
@@ -273,11 +285,29 @@ def grid_trades(panel, strength, groups, cfg: Config = DEFAULT_CONFIG) -> dict[t
     return out
 
 
+def grid_trades_vcp(panel, strength, groups, cfg: Config = DEFAULT_CONFIG):
+    """訊號 A / C：對 (min_swing_pct, vol_dry_ratio) 小網格。回傳 (grid, 固定參數的 VCP 偵測結果)。"""
+    from .signals import signal_vcp
+    from .vcp_detector import detect_all
+
+    out, swings_cache, fixed_vcp = {}, {}, None
+    fixed = (cfg.vcp.min_swing_pct, cfg.vcp.vol_dry_ratio)
+    for ms in cfg.wf.grid_min_swing_pct:
+        for vd in cfg.wf.grid_vol_dry_ratio:
+            vcfg = replace(cfg.vcp, min_swing_pct=ms, vol_dry_ratio=vd)
+            vcp = detect_all(panel, vcfg, swings_cache, setup_on_last_day=(ms, vd) == fixed)
+            out[(ms, vd)] = simulate_trades(panel, signal_vcp(vcp, strength, groups), cfg.trade)
+            logger.info("VCP 網格 swing=%.2f vol_dry=%.1f：%d 筆突破", ms, vd, int(vcp["is_breakout"].sum()))
+            if (ms, vd) == fixed:
+                fixed_vcp = vcp
+    return out, fixed_vcp
+
+
 def sensitivity_table(grid: dict[tuple, pd.DataFrame]) -> pd.DataFrame:
     rows = []
-    for (pa, rk), tr in grid.items():
+    for key, tr in grid.items():
         for variant, g in tr.groupby("variant"):
-            rows.append({"pct_above_ma20": pa, "rank": rk, "variant": variant, **summarize(g).to_dict()})
+            rows.append({"p1": key[0], "p2": key[1], "variant": variant, **summarize(g).to_dict()})
     return pd.DataFrame(rows)
 
 
@@ -304,6 +334,10 @@ def walk_forward(grid: dict[tuple, pd.DataFrame], fixed_key: tuple,
             perf = is_tr.groupby("key")["r"].agg(["mean", "size"])
             perf = perf[perf["size"] >= cfg.wf.min_is_trades]
             if perf.empty:
+                rows.append({"variant": variant, "oos_year": y, "chosen": "IS 交易數不足",
+                             "fixed_oos_avg_r": oos_tr.loc[oos_tr["key"] == fixed_key, "r"].mean(),
+                             "fixed_oos_n": int((oos_tr["key"] == fixed_key).sum())})
+                oos_parts.append(oos_tr[oos_tr["key"] == fixed_key].assign(mode="fixed"))
                 continue
             best = perf["mean"].idxmax()
             sel = oos_tr[oos_tr["key"] == best]
@@ -317,6 +351,17 @@ def walk_forward(grid: dict[tuple, pd.DataFrame], fixed_key: tuple,
     return pd.DataFrame(rows), (pd.concat(oos_parts, ignore_index=True) if oos_parts else pd.DataFrame())
 
 
+def diff_test(a: pd.Series, b: pd.Series, n_boot: int = 5000, seed: int = 0) -> dict:
+    """兩組 R 的平均差（a − b）與 bootstrap 95% 信賴區間。"""
+    a, b = a.dropna().to_numpy(), b.dropna().to_numpy()
+    if len(a) < 2 or len(b) < 2:
+        return {"diff": np.nan, "ci_low": np.nan, "ci_high": np.nan, "n_a": len(a), "n_b": len(b)}
+    rng = np.random.default_rng(seed)
+    boots = (rng.choice(a, (n_boot, len(a))).mean(1) - rng.choice(b, (n_boot, len(b))).mean(1))
+    return {"diff": a.mean() - b.mean(), "ci_low": np.percentile(boots, 2.5),
+            "ci_high": np.percentile(boots, 97.5), "n_a": len(a), "n_b": len(b)}
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -324,34 +369,14 @@ def _fmt(df: pd.DataFrame) -> str:
     return df.to_string(float_format=lambda x: f"{x:,.3f}")
 
 
-def main(argv=None):
-    from .report import OUTPUT_DIR, load_inputs
-
-    p = argparse.ArgumentParser(description="訊號 B 回測（族群剛轉強 → 龍頭 / 落後）")
-    p.add_argument("--groups", choices=["official", "theme"], default="official")
-    p.add_argument("--synthetic", action="store_true")
-    p.add_argument("--no-api", action="store_true")
-    args = p.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    pd.set_option("display.width", 200)
-    cfg = DEFAULT_CONFIG
-
-    inp = load_inputs(args.groups, args.synthetic, not args.no_api, cfg)
-    panel = StockPanel(inp["prices"], inp["eligible"], cfg.leadlag, cfg.data.turnover_window)
-    strength, groups, bench = inp["strength"], inp["groups"], inp["benchmark"]
-
-    logger.info("產生訊號 B 並模擬（含 %d 組敏感度網格）…",
-                len(cfg.wf.grid_pct_above_ma20) * len(cfg.wf.grid_rank))
-    grid = grid_trades(panel, strength, groups, cfg)
-    fixed_key = (cfg.sector.strong_pct_above_ma20, cfg.sector.strong_rank)
+def report(panel, bench, grid, fixed_key, cfg, tag, label, param_names, stop_mode, out_dir):
     trades = attach_regime(grid[fixed_key], bench)
-
-    tag = ("synthetic_" if args.synthetic else "") + args.groups
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    trades.to_csv(OUTPUT_DIR / f"trades_B_{tag}.csv", index=False, encoding="utf-8-sig")
-
+    trades.to_csv(out_dir / f"trades_{tag}.csv", index=False, encoding="utf-8-sig")
+    if trades.empty:
+        print("沒有任何交易。")
+        return trades
     print("\n" + "=" * 80)
-    print(f"訊號 B｜固定參數 pct_above_ma20>={fixed_key[0]}、rank>={fixed_key[1]}｜"
+    print(f"{label}｜固定參數 {param_names[0]}={fixed_key[0]}、{param_names[1]}={fixed_key[1]}｜"
           f"{trades['signal_date'].min():%Y-%m-%d} ~ {trades['exit_date'].max():%Y-%m-%d}")
     print("=" * 80)
     print("\n[1] 單筆交易統計（R = 以停損距離為 1R，已扣手續費、證交稅、滑價）")
@@ -359,11 +384,11 @@ def main(argv=None):
 
     print("\n[2] 隨機進場 baseline（同日同筆數，全市場可交易股隨機抽，同樣出場規則）")
     sig_fixed = trades[["signal_date", "stock_id", "group", "variant", "stop_price"]]
-    base = random_baseline(panel, sig_fixed, cfg.trade, cfg.wf.n_random_baseline)
+    base = random_baseline(panel, sig_fixed, cfg.trade, cfg.wf.n_random_baseline, stop_mode=stop_mode)
     for variant, g in base.groupby("variant"):
         actual = trades.loc[trades["variant"] == variant, "r"].mean()
         pct = (g["avg_r"] < actual).mean()
-        print(f"  {variant:10s} 實際 avg_r={actual:+.3f}｜隨機 avg_r 平均 {g['avg_r'].mean():+.3f}"
+        print(f"  {variant:18s} 實際 avg_r={actual:+.3f}｜隨機 avg_r 平均 {g['avg_r'].mean():+.3f}"
               f"（範圍 {g['avg_r'].min():+.3f} ~ {g['avg_r'].max():+.3f}）｜實際勝過 {pct:.0%} 的隨機組")
 
     cols = ["n", "win_rate", "avg_r", "t_stat"]
@@ -376,31 +401,81 @@ def main(argv=None):
     print("\n[4] 分 regime（訊號日大盤狀態）")
     print(_fmt(trades.groupby(["regime", "variant"]).apply(summarize, include_groups=False)[cols]))
 
-    print("\n[5] 參數敏感度（族群門檻小網格；看穩定性，不是挑最高分）")
-    sens = sensitivity_table(grid)
-    sens.to_csv(OUTPUT_DIR / f"sensitivity_B_{tag}.csv", index=False, encoding="utf-8-sig")
-    print(_fmt(sens.pivot_table(index=["variant", "pct_above_ma20"], columns="rank", values="avg_r")))
+    print(f"\n[5] 參數敏感度（{param_names[0]} × {param_names[1]}；看穩定性，不是挑最高分）")
+    sens = sensitivity_table(grid).rename(columns={"p1": param_names[0], "p2": param_names[1]})
+    sens.to_csv(out_dir / f"sensitivity_{tag}.csv", index=False, encoding="utf-8-sig")
+    print(_fmt(sens.pivot_table(index=["variant", param_names[0]], columns=param_names[1], values="avg_r")))
+    print("  （各格交易數）")
+    print(_fmt(sens.pivot_table(index=["variant", param_names[0]], columns=param_names[1], values="n")))
 
     print("\n[6] Walk-forward（IS 3 年選參數 → OOS 1 年；只看 OOS）")
     wf, oos = walk_forward(grid, fixed_key, cfg)
     if not wf.empty:
-        wf.to_csv(OUTPUT_DIR / f"walkforward_B_{tag}.csv", index=False, encoding="utf-8-sig")
+        wf.to_csv(out_dir / f"walkforward_{tag}.csv", index=False, encoding="utf-8-sig")
         print(_fmt(wf))
         agg = oos.groupby(["variant", "mode"]).apply(summarize, include_groups=False)
         print("\n  OOS 串接：")
-        print(_fmt(agg[["n", "win_rate", "avg_r", "t_stat"]]))
-        pos = wf.groupby("variant")["fixed_oos_avg_r"].apply(lambda s: f"{(s > 0).sum()}/{len(s)}")
+        print(_fmt(agg[cols]))
+        pos = wf.groupby("variant")["fixed_oos_avg_r"].apply(lambda s: f"{(s > 0).sum()}/{s.notna().sum()}")
         print("\n  固定參數 OOS 年度為正的比例：", pos.to_dict())
 
     print("\n[7] 投組模擬（每筆風險 1%、最多 10 檔、單檔上限 20%、可零股）")
     rows = {}
     for variant, g in trades.groupby("variant"):
         eq, taken = simulate_portfolio(panel, g, cfg.trade)
-        eq.to_csv(OUTPUT_DIR / f"equity_{variant}_{tag}.csv", header=["equity"], encoding="utf-8-sig")
+        eq.to_csv(out_dir / f"equity_{variant}_{tag}.csv", header=["equity"], encoding="utf-8-sig")
         rows[variant] = pd.concat([equity_stats(eq), pd.Series({"trades_taken": len(taken)})])
     bench_eq = bench.loc[trades["entry_date"].min():]
     rows["大盤(價格指數)"] = equity_stats(bench_eq / bench_eq.iloc[0] * cfg.trade.initial_capital)
     print(_fmt(pd.DataFrame(rows).T))
+    return trades
+
+
+def main(argv=None):
+    from .report import OUTPUT_DIR, load_inputs
+
+    p = argparse.ArgumentParser(description="訊號回測：B（族群轉強）或 vcp（A 純 VCP vs C VCP+族群）")
+    p.add_argument("--signal", choices=["B", "vcp"], default="vcp")
+    p.add_argument("--groups", choices=["official", "theme"], default="official")
+    p.add_argument("--synthetic", action="store_true")
+    p.add_argument("--no-api", action="store_true")
+    args = p.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    pd.set_option("display.width", 250)
+    cfg = DEFAULT_CONFIG
+
+    inp = load_inputs(args.groups, args.synthetic, not args.no_api, cfg)
+    panel = StockPanel(inp["prices"], inp["eligible"], cfg.leadlag, cfg.data.turnover_window)
+    strength, groups, bench = inp["strength"], inp["groups"], inp["benchmark"]
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    tag = ("synthetic_" if args.synthetic else "") + args.groups
+
+    if args.signal == "B":
+        logger.info("訊號 B：產生訊號並模擬（含 9 組敏感度網格）…")
+        grid = grid_trades(panel, strength, groups, cfg)
+        fixed_key = (cfg.sector.strong_pct_above_ma20, cfg.sector.strong_rank)
+        report(panel, bench, grid, fixed_key, cfg, f"B_{tag}", "訊號 B（族群剛轉強 → 龍頭 / 落後）",
+               ("pct_above_ma20", "rank"), "lowest_low", OUTPUT_DIR)
+    else:
+        logger.info("訊號 A / C：VCP 偵測（9 組參數網格，約數分鐘）…")
+        grid, vcp = grid_trades_vcp(panel, strength, groups, cfg)
+        fixed_key = (cfg.vcp.min_swing_pct, cfg.vcp.vol_dry_ratio)
+        vcp.to_csv(OUTPUT_DIR / f"vcp_signals_{tag}.csv", index=False, encoding="utf-8-sig")
+        trades = report(panel, bench, grid, fixed_key, cfg, f"vcp_{tag}", "訊號 A / C（VCP 突破 ± 族群強度）",
+                        ("min_swing_pct", "vol_dry_ratio"), "same_pct", OUTPUT_DIR)
+        if not trades.empty:
+            print("\n[8] 主要假設：C（族群強）是否優於 A 中族群不強的那組？（bootstrap 95% 信賴區間）")
+            r = trades.groupby("variant")["r"]
+            for a_, b_ in (("C_vcp_strong", "A_vcp_not_strong"), ("C_vcp_strong", "A_vcp")):
+                if a_ in r.groups and b_ in r.groups:
+                    d = diff_test(r.get_group(a_), r.get_group(b_))
+                    print(f"  {a_} − {b_}: {d['diff']:+.3f}R（95% CI {d['ci_low']:+.3f} ~ {d['ci_high']:+.3f}；"
+                          f"n={d['n_a']} vs {d['n_b']}）")
+            print("  註：信賴區間跨過 0 = 統計上無法區分。")
+            last = vcp[~vcp["is_breakout"]]
+            print(f"\n[9] 最新一日 VCP setup（尚未突破）：{len(last)} 檔")
+            if len(last):
+                print(_fmt(last[["stock_id", "pivot", "stop_price", "n_contractions", "contraction_depths"]]))
     print(f"\n輸出：{OUTPUT_DIR}")
 
 

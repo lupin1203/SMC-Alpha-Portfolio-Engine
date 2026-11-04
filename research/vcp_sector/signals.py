@@ -44,3 +44,33 @@ def signal_b(panel: StockPanel, strength: pd.DataFrame, groups: dict[str, list[s
     sig = pd.DataFrame(rows, columns=SIGNAL_COLS)
     # 同一天同一檔被多個族群選到 → 只留一筆
     return sig.drop_duplicates(["signal_date", "stock_id", "variant"]).reset_index(drop=True)
+
+
+def signal_vcp(vcp: pd.DataFrame, strength: pd.DataFrame, groups: dict[str, list[str]]) -> pd.DataFrame:
+    """訊號 A / C。
+
+    - A_vcp：所有 VCP 突破
+    - C_vcp_strong：突破日（t）所屬族群 is_strong（任一族群即可）
+    - A_vcp_not_strong：突破日所屬族群「不是」is_strong（C 的對照組；A = C ∪ 這組）
+    停損 = VCP 最後一段收縮低點。
+    """
+    bo = vcp[vcp["is_breakout"]].copy()
+    if bo.empty:
+        return pd.DataFrame(columns=SIGNAL_COLS)
+    strong = set(map(tuple, strength.loc[strength["is_strong"], ["date", "group"]].to_numpy()))
+    s2g: dict[str, list[str]] = {}
+    for g, ids in groups.items():
+        for s in ids:
+            s2g.setdefault(s, []).append(g)
+
+    rows = []
+    for r in bo.itertuples(index=False):
+        gs = s2g.get(r.stock_id, [])
+        strong_gs = [g for g in gs if (r.date, g) in strong]
+        base = {"signal_date": r.date, "stock_id": r.stock_id, "stop_price": r.stop_price}
+        rows.append(base | {"group": gs[0] if gs else "", "variant": "A_vcp"})
+        if strong_gs:
+            rows.append(base | {"group": strong_gs[0], "variant": "C_vcp_strong"})
+        else:
+            rows.append(base | {"group": gs[0] if gs else "", "variant": "A_vcp_not_strong"})
+    return pd.DataFrame(rows, columns=SIGNAL_COLS)

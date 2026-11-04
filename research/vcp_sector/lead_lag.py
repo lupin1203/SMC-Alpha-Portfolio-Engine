@@ -20,7 +20,7 @@ class StockPanel:
     def __init__(self, prices: pd.DataFrame, eligible: pd.DataFrame,
                  cfg: LeadLagConfig = DEFAULT_CONFIG.leadlag, turnover_window: int = 20):
         wide = {f: prices.pivot(index="date", columns="stock_id", values=f).sort_index()
-                for f in ("open", "high", "low", "close", "turnover")}
+                for f in ("open", "high", "low", "close", "volume", "turnover")}
         self.dates = wide["close"].index
         self.stocks = wide["close"].columns
         for k, v in wide.items():
