@@ -90,7 +90,7 @@ findOB(bool bull, int brokenBar) =>
     int org = 0
     if not na(intBar) and intBar > brokenBar and intBar < bar_index
         org := bar_index - intBar
-    else
+    if org == 0
         for k = 0 to span
             if bull ? low[k] < low[org] : high[k] > high[org]
                 org := k
@@ -146,8 +146,8 @@ updateZones(array<Zone> arr, bool isFvg) =>
                 if broken
                     z.active := false
                     if delMitig
-                        z.bx.delete()
                         arr.remove(i)
+                        z.bx.delete()
                 else
                     z.bx.set_right(bar_index + 1)
 
