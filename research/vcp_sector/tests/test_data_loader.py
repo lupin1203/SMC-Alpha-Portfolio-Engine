@@ -122,3 +122,21 @@ def test_partial_bar_not_cached_and_stale_cache_refetched(tmp_path, monkeypatch)
     calls.clear()
     dl.load_prices(["2330"], cfg)
     assert calls == [["2330.TW"]]
+
+
+def test_stale_local_data_refreshed(tmp_path, monkeypatch):
+    cfg = DataConfig(local_data_dir=tmp_path / "local_data", cache_dir=tmp_path / "cache",
+                     start_date="2024-01-01", max_stale_bdays=1)
+    cfg.local_data_dir.mkdir(parents=True)
+    idx = pd.bdate_range("2024-01-01", periods=2)            # 停在 01-02
+    pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0},
+                 index=idx).to_parquet(cfg.local_data_dir / "2330.parquet")
+    monkeypatch.setattr(dl, "last_complete_session", lambda **k: pd.Timestamp("2024-01-05"))
+    mod, calls = _fake_yf({"2330.TW"})
+    monkeypatch.setitem(sys.modules, "yfinance", mod)
+    monkeypatch.setattr(dl, "_finmind_get", lambda *a, **k: pd.DataFrame())
+    df = dl.load_prices(["2330"], cfg)
+    assert calls == [["2330.TW"]] and df["date"].max() == pd.Timestamp("2024-01-05")
+    # 不連網時仍照用舊的 local_data
+    (cfg.cache_dir / "prices_adj" / "2330.parquet").unlink()
+    assert dl.load_prices(["2330"], cfg, use_api=False)["date"].max() == pd.Timestamp("2024-01-02")

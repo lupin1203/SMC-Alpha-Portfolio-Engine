@@ -150,7 +150,7 @@ def filter_security_type(info: pd.DataFrame, cfg: DataConfig = DEFAULT_CONFIG.da
     is_common = sid.str.fullmatch(r"[1-9]\d{3}")
     bad_cat = info["industry_category"].isin(cfg.excluded_categories)
     # 興櫃（emerging）流動性差、Yahoo 多半沒有資料，不納入
-    bad_type = info["type"].isin(cfg.excluded_types) if "type" in info else False
+    bad_type = info["type"].isin(cfg.excluded_types) if "type" in info else pd.Series(False, index=info.index)
     return info[is_common & ~bad_cat & ~bad_type].reset_index(drop=True)
 
 
@@ -200,7 +200,8 @@ def _cache_path(cfg: DataConfig, stock_id: str):
 
 
 def _read_cached(stock_id: str, cfg: DataConfig, require_fresh: bool = False) -> pd.DataFrame:
-    """local_data（SMC 系統自行維護，照用）→ 本模組快取（過期則視為沒有，重新下載）。"""
+    """local_data（SMC 系統維護）→ 本模組快取。require_fresh 時，過期的檔案一律略過、改下載新資料
+    （存到本模組快取，不會覆寫 local_data）。"""
     own = _cache_path(cfg, stock_id)
     for path in (cfg.local_data_dir / f"{stock_id}.parquet",
                  cfg.local_data_dir / f"{stock_id}.TW.parquet",
@@ -209,7 +210,7 @@ def _read_cached(stock_id: str, cfg: DataConfig, require_fresh: bool = False) ->
         if path.exists():
             try:
                 df = _read_local_parquet(path)
-                if df.empty or (path == own and require_fresh and not _is_fresh(df, cfg)):
+                if df.empty or (require_fresh and not _is_fresh(df, cfg)):
                     continue
                 df["stock_id"] = stock_id
                 return _drop_incomplete(df[LONG_COLS], cfg)
