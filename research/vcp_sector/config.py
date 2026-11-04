@@ -85,6 +85,9 @@ class VCPConfig:
     contraction_ratio: float = 0.8    # 每段深度 <= 前一段 × 0.8
     max_first_depth: float = 0.35
     max_last_depth: float = 0.10
+    # 人工檢查 30 例後加入（依看圖判斷決定，非依回測結果）：
+    min_base_days: int = 20           # 整理期至少約一個月的交易日
+    max_pivot_below_base_high: float = 0.10  # pivot 需在整理區最高點 10% 以內，否則只是區間內反彈
     # 3. 量縮
     vol_dry_ratio: float = 0.7        # 最後一段均量 < 整理前 50 日均量 × 0.7
     pre_base_vol_days: int = 50

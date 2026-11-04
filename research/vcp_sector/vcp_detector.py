@@ -7,6 +7,8 @@
 2. 收縮結構：近 lookback 日內最高的 swing High 為整理起點 H0，之後每組 (swing High → swing Low)
    為一段收縮；取最後 2–4 段，深度逐段遞減（<= 前段 × contraction_ratio），
    第一段 <= 35%，最後一段 <= 10%；最後一個已確認轉折必須是 Low（收縮已完成）
+   ＋ 整理期（H0 → 突破日）>= min_base_days；pivot 距 H0 <= max_pivot_below_base_high
+   （這兩條是人工檢查 30 例後加的：短 base 與「整理區間內的反彈」被誤判為 VCP）
 3. 量縮：最後一段收縮（H→L）期間均量 < H0 之前 50 日均量 × vol_dry_ratio
 4. pivot = 最後一段收縮的 swing High；stop = 最後一段收縮的 swing Low
 5. 突破：close > pivot、前一日 close <= pivot（首次突破）、
@@ -76,8 +78,12 @@ def analyze_base(a: StockArrays, swings: list[tuple], t: int, cfg: VCPConfig = D
     if any(d > prev * cfg.contraction_ratio for prev, d in zip(depths, depths[1:])):
         return None
 
-    base_i = pairs[0][0][0]
+    base_i, base_high = seq[0][0], seq[0][1]          # H0：整理起點與整理區最高價
     last_h, last_l = pairs[-1]
+    if t - base_i < cfg.min_base_days:                # 整理太短：多半只是急漲後的震盪
+        return None
+    if last_h[1] < base_high * (1 - cfg.max_pivot_below_base_high):
+        return None                                   # pivot 離整理頂部太遠：突破只是區間內反彈
     pre = a.volume[max(0, base_i - cfg.pre_base_vol_days):base_i]
     pre = pre[np.isfinite(pre)]
     last_seg = a.volume[last_h[0]:last_l[0] + 1]

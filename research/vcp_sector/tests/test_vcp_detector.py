@@ -88,3 +88,37 @@ def test_non_shrinking_last_contraction_rejected():
     assert _detect(idx, hi, lo, c, v).empty
     idx, hi, lo, c, v, _ = _build(depths=(0.20, 0.10, 0.05))   # 對照組：遞減就要抓到
     assert len(_detect(idx, hi, lo, c, v)) == 1
+
+
+def test_short_base_rejected():
+    """同樣的收縮結構壓縮在 20 日內 → 整理太短，不算。"""
+    from dataclasses import replace
+    idx, hi, lo, c, v, _ = _build()
+    a = prepare_arrays(hi, lo, c, v, CFG)
+    sw = zigzag(a.high, a.low, CFG.min_swing_pct)
+    assert len(detect_stock(idx, "X", a, sw, CFG)) == 1
+    strict = replace(CFG, min_base_days=200)
+    assert detect_stock(idx, "X", prepare_arrays(hi, lo, c, v, strict), sw, strict) == []
+
+
+def test_pivot_far_below_base_high_rejected():
+    """整理頂 100，但後段高點只到 ~85：突破 85 只是區間內反彈。
+
+    直接測 analyze_base（收縮結構），避免被趨勢條件先擋掉而誤判為通過。
+    """
+    from dataclasses import replace
+    from research.vcp_sector.vcp_detector import analyze_base
+    pts = [(0, 50, 1e6), (260, 100, 1e6),
+           (15, 75, 1e6), (12, 85, 0.8e6),        # 25% 回檔後只反彈到 85
+           (9, 79.9, 0.8e6), (10, 84, 0.5e6),     # 6% 收縮
+           (6, 80.6, 0.5e6), (8, 83.5, 0.5e6),    # 4% 收縮
+           (1, 86, 3e6), (10, 88, 1e6)]
+    close, vol = _path(pts)
+    t = sum(p[0] for p in pts[:-1])
+    idx = pd.bdate_range("2023-01-02", periods=len(close))
+    s = lambda x: pd.Series(x, index=idx)
+    a = prepare_arrays(s(close * 1.005), s(close * 0.995), s(close), s(vol), CFG)
+    sw = zigzag(a.high, a.low, CFG.min_swing_pct)
+    loose = replace(CFG, max_pivot_below_base_high=1.0)
+    assert analyze_base(a, sw, t, loose) is not None   # 結構本身成立（對照組）
+    assert analyze_base(a, sw, t, CFG) is None         # pivot 離頂部 >10% → 擋掉
