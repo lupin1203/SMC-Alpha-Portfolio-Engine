@@ -140,8 +140,9 @@ updateZones(array<Zone> arr, bool isFvg) =>
         for i = arr.size() - 1 to 0
             z = arr.get(i)
             if z.active
-                broken = isFvg ? (z.dir == 1 ? low < z.bot : high > z.top) :
-                                 (z.dir == 1 ? close < z.bot : close > z.top)
+                bool fvgBroken = z.dir == 1 ? low < z.bot : high > z.top
+                bool obBroken  = z.dir == 1 ? close < z.bot : close > z.top
+                bool broken    = isFvg ? fvgBroken : obBroken
                 if broken
                     z.active := false
                     if delMitig
