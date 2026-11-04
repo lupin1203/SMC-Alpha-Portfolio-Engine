@@ -46,13 +46,14 @@ def signal_b(panel: StockPanel, strength: pd.DataFrame, groups: dict[str, list[s
     return sig.drop_duplicates(["signal_date", "stock_id", "variant"]).reset_index(drop=True)
 
 
-def signal_vcp(vcp: pd.DataFrame, strength: pd.DataFrame, groups: dict[str, list[str]]) -> pd.DataFrame:
+def signal_vcp(vcp: pd.DataFrame, strength: pd.DataFrame, groups: dict[str, list[str]],
+               max_chase_pct: float = 0.05) -> pd.DataFrame:
     """訊號 A / C。
 
     - A_vcp：所有 VCP 突破
     - C_vcp_strong：突破日（t）所屬族群 is_strong（任一族群即可）
     - A_vcp_not_strong：突破日所屬族群「不是」is_strong（C 的對照組；A = C ∪ 這組）
-    停損 = VCP 最後一段收縮低點。
+    停損 = VCP 最後一段收縮低點；max_entry = pivot × (1 + max_chase_pct)，隔日開盤高於此價不追。
     """
     bo = vcp[vcp["is_breakout"]].copy()
     if bo.empty:
@@ -67,10 +68,11 @@ def signal_vcp(vcp: pd.DataFrame, strength: pd.DataFrame, groups: dict[str, list
     for r in bo.itertuples(index=False):
         gs = s2g.get(r.stock_id, [])
         strong_gs = [g for g in gs if (r.date, g) in strong]
-        base = {"signal_date": r.date, "stock_id": r.stock_id, "stop_price": r.stop_price}
+        base = {"signal_date": r.date, "stock_id": r.stock_id, "stop_price": r.stop_price,
+                "max_entry": r.pivot * (1 + max_chase_pct)}
         rows.append(base | {"group": gs[0] if gs else "", "variant": "A_vcp"})
         if strong_gs:
             rows.append(base | {"group": strong_gs[0], "variant": "C_vcp_strong"})
         else:
             rows.append(base | {"group": gs[0] if gs else "", "variant": "A_vcp_not_strong"})
-    return pd.DataFrame(rows, columns=SIGNAL_COLS)
+    return pd.DataFrame(rows, columns=SIGNAL_COLS + ["max_entry"])

@@ -8,6 +8,7 @@
 
 時間軸（防前視）：
 - 訊號在 t 日收盤後產生（只用 t 日含以前資料），t+1 日開盤進場
+  （VCP 訊號若 t+1 開盤 > pivot × (1 + max_chase_pct) 則不追，放棄這筆）
 - 停損價在 t 日就決定；盤中觸及停損 → 以 min(開盤, 停損) 出場（跳空跌破用開盤價）
 - 移動停利 / 跌破 MA20 / 時間停損都是 d 日收盤判斷、d+1 日開盤出場
 - walk-forward 的 IS 只計入「出場日 < OOS 起始日」的交易，避免 IS 用到 OOS 期間的價格
@@ -58,6 +59,9 @@ def simulate_trades(panel: StockPanel, signals: pd.DataFrame,
         e = i + 1
         stop = sig.stop_price
         if not np.isfinite(O[e, j]) or not np.isfinite(stop):
+            continue
+        max_entry = getattr(sig, "max_entry", np.nan)
+        if np.isfinite(max_entry) and O[e, j] > max_entry:   # 跳空離 pivot 太遠：不追
             continue
         entry = O[e, j] * (1 + tcfg.slippage)
         risk = (entry - stop) / entry
@@ -296,7 +300,8 @@ def grid_trades_vcp(panel, strength, groups, cfg: Config = DEFAULT_CONFIG):
         for vd in cfg.wf.grid_vol_dry_ratio:
             vcfg = replace(cfg.vcp, min_swing_pct=ms, vol_dry_ratio=vd)
             vcp = detect_all(panel, vcfg, swings_cache, setup_on_last_day=(ms, vd) == fixed)
-            out[(ms, vd)] = simulate_trades(panel, signal_vcp(vcp, strength, groups), cfg.trade)
+            sig = signal_vcp(vcp, strength, groups, cfg.vcp.max_chase_pct)
+            out[(ms, vd)] = simulate_trades(panel, sig, cfg.trade)
             logger.info("VCP 網格 swing=%.2f vol_dry=%.1f：%d 筆突破", ms, vd, int(vcp["is_breakout"].sum()))
             if (ms, vd) == fixed:
                 fixed_vcp = vcp

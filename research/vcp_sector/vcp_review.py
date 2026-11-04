@@ -50,8 +50,15 @@ def plot_case(panel: StockPanel, row, cfg=DEFAULT_CONFIG.vcp, pad_before: int = 
     for y, color, name in ((row.pivot, "#1f77b4", "pivot"), (row.stop_price, "#d62728", "停損")):
         fig.add_trace(go.Scatter(x=[panel.dates[b], d[-1]], y=[y, y], mode="lines", name=name,
                                  line=dict(color=color, dash="dash", width=1)), 1, 1)
-    fig.add_trace(go.Scatter(x=[row.date], y=[c.loc[row.date]], mode="markers", name="突破日",
-                             marker=dict(symbol="star", size=14, color="green")), 1, 1)
+    is_bo = bool(getattr(row, "is_breakout", True))
+    fig.add_trace(go.Scatter(x=[row.date], y=[c.loc[row.date]], mode="markers",
+                             name="突破日" if is_bo else "今日（整理中）",
+                             marker=dict(symbol="star" if is_bo else "circle", size=14,
+                                         color="green" if is_bo else "purple")), 1, 1)
+    chase = row.pivot * (1 + cfg.max_chase_pct)
+    fig.add_trace(go.Scatter(x=[panel.dates[b], d[-1]], y=[chase, chase], mode="lines",
+                             name=f"追價上限 +{cfg.max_chase_pct:.0%}",
+                             line=dict(color="#1f77b4", dash="dot", width=1)), 1, 1)
     fig.add_vrect(x0=panel.dates[b], x1=row.date, fillcolor="gray", opacity=0.08, line_width=0, row=1, col=1)
     fig.add_trace(go.Bar(x=d, y=v, name="量", marker_color="#9ecae1", showlegend=False), 2, 1)
     title = (f"{s}｜突破 {row.date:%Y-%m-%d}｜收縮 {row.n_contractions} 段：{row.contraction_depths}"

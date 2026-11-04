@@ -143,3 +143,11 @@ def test_portfolio_equity_matches_trade_pnl():
     pnl = (taken["shares"] * (taken["exit_price"] * (1 - cfg.slippage) * (1 - cfg.fee_rate - cfg.tax_rate)
                               - taken["entry_price"] * (1 + cfg.fee_rate))).sum()
     assert eq.iloc[-1] == pytest.approx(cfg.initial_capital + pnl, rel=1e-9)
+
+
+def test_no_chase_above_max_entry():
+    p, d = _panel(o=[10, 10, 11, 11], h=[10.2, 10.2, 11.2, 11.2], l=[9.8, 9.8, 10.8, 10.8], c=[10, 10, 11, 11])
+    sig = _sig(d[1], 9.0).assign(max_entry=10.5)          # 隔日開盤 11 > 10.5 → 不追
+    assert simulate_trades(p, sig, NOCOST).empty
+    sig = _sig(d[1], 9.0).assign(max_entry=11.5)
+    assert len(simulate_trades(p, sig, NOCOST)) == 1

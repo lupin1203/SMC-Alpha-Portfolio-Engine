@@ -1,7 +1,15 @@
 # VCP + 族群連動（研究模組）
 
-計畫：`vcp_sector_plan.md`。目前完成 **Phase 1–3（資料層、族群分群、族群強度）**、
-Phase 4 簡化版（龍頭 / 落後），以及 **訊號 B 的回測 + walk-forward**。VCP（Phase 5–6）尚未開始。
+計畫：`vcp_sector_plan.md`。完成 Phase 1–8（族群強度、龍頭/落後簡化版、swing 點、VCP 偵測、
+訊號 A/B/C 回測 + walk-forward），以及**半自動選股流程**（每日候選清單 + 人工判斷紀錄 + 判斷績效檢驗）。
+
+## 日常使用（半自動）
+```bash
+python -m research.vcp_sector.screener      # 每天收盤後：候選清單 CSV + K 線 HTML
+#   → 在 output/journal/candidates_YYYYMMDD.csv 的 decision 欄填「買」/「不買」、note 寫理由
+python -m research.vcp_sector.journal       # 累積一段時間後：你挑的 vs 沒挑的 vs 全部
+python -m research.vcp_sector.screener --date 2024-06-19   # 重現過去某天（練習用）
+```
 
 ## 執行（在 repo 根目錄）
 
@@ -10,7 +18,10 @@ python -m pip install pandas numpy pyyaml plotly pyarrow pytest requests yfinanc
 python -m research.vcp_sector.report                 # 官方產業別
 python -m research.vcp_sector.report --groups theme  # groups.yaml 自訂題材
 python -m research.vcp_sector.report --synthetic     # 人造資料，只檢查流程
-python -m research.vcp_sector.backtest              # 訊號 B 回測（約 2–5 分鐘）
+python -m research.vcp_sector.backtest --signal vcp # 訊號 A/C 回測（約 5–10 分鐘）
+python -m research.vcp_sector.backtest --signal B   # 訊號 B 回測
+python -m research.vcp_sector.vcp_review --n 30     # VCP 人工檢查頁
+python -m research.vcp_sector.diagnose              # 族群分類 / 可交易股數診斷
 python -m pytest research/vcp_sector/tests -q
 ```
 
@@ -46,3 +57,15 @@ python -m pytest research/vcp_sector/tests -q
 - 投組：每筆風險 1%、最多 10 檔、單檔上限 20%、可零股
 - 比較：同日同筆數的隨機進場 baseline（20 組）、分年度、分 regime、族群門檻 3×3 敏感度、
   walk-forward（IS 3 年選參數 → OOS 1 年，IS 只計入在 OOS 開始前已出場的交易）
+
+## VCP 規則（vcp_detector.py；參數在 config.py 的 VCPConfig）
+趨勢樣板 → 近 120 日最高 swing High 起算，2–4 段收縮逐段變淺（≤ 前段 × 0.8，首段 ≤ 35%、末段 ≤ 10%）
+→ 末段均量 < 整理前 50 日均量 × 0.7 → 突破 pivot 且量 > 前 50 日均量 × 1.5。
+人工檢查 30 例後加入（依看圖判斷，非依回測結果）：整理期 ≥ 20 交易日、pivot 距整理頂 ≤ 10%、
+隔日開盤 > pivot × 1.05 不追。
+
+## 目前的回測結論（2016–2026，固定參數）
+- 訊號 B（族群剛轉強就買）：負期望值，與隨機進場無異，參數怎麼調都一樣。
+- VCP（加入整理期/pivot 規則後）：A 約 +0.06R，但 10 年僅約 100 筆、t 值 < 1，無法與運氣區分。
+- 族群過濾（C）沒有讓 VCP 變好（樣本僅十幾筆）。
+- 因此改為半自動：程式篩、人工判斷，並用 journal 檢驗人工判斷是否真的加分。

@@ -90,8 +90,11 @@ def plot_strength_heatmap(strength: pd.DataFrame, metric: str = "group_rank",
 
 
 def load_inputs(groups_mode: str = "official", synthetic: bool = False, use_api: bool = True,
-                cfg=DEFAULT_CONFIG) -> dict:
-    """讀資料 → 分群 → 可交易池 → 族群強度。heatmap 與 backtest 共用。"""
+                cfg=DEFAULT_CONFIG, as_of=None) -> dict:
+    """讀資料 → 分群 → 可交易池 → 族群強度。heatmap / backtest / screener 共用。
+
+    as_of：只使用該日（含）以前的資料，等同「回到那天」——可用來重現過去某天的選股清單。
+    """
     if synthetic:
         from .synthetic import make_synthetic_market
 
@@ -103,6 +106,10 @@ def load_inputs(groups_mode: str = "official", synthetic: bool = False, use_api:
             raise SystemExit("沒有任何價格資料：請先跑 update_data.py 建 local_data/，"
                              "或確認網路可連 yfinance，或用 --synthetic 檢查流程。")
         bench = load_benchmark(cfg.data, use_api=use_api)
+    if as_of is not None:
+        as_of = pd.Timestamp(as_of)
+        prices = prices[prices["date"] <= as_of]
+        bench = bench.loc[:as_of]
 
     universe = set(prices["stock_id"].unique())
     if groups_mode == "theme":
