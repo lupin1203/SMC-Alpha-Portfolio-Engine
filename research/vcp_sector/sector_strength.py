@@ -109,17 +109,25 @@ def compute_sector_strength(
     rank_wide = rs_wide.rank(axis=1, pct=True)  # NaN 族群不參與排名
     out["group_rank"] = rank_wide.stack().reindex(out.swaplevel().index).to_numpy()
 
-    breadth_wide = out["pct_above_ma20"].unstack("group")
-    rising = (breadth_wide > breadth_wide.shift(cfg.strong_breadth_lookback)).stack()
+    out["is_strong"] = False
+    out = out.reset_index()[["date", "group"] + METRIC_COLS]
+    out["n_members"] = out["n_members"].astype(int)
+    out = out.sort_values(["date", "group"]).reset_index(drop=True)
+    return apply_strong_rule(out, cfg)
+
+
+def apply_strong_rule(strength: pd.DataFrame, cfg: SectorConfig = DEFAULT_CONFIG.sector) -> pd.DataFrame:
+    """依 cfg 的門檻重新計算 is_strong（敏感度分析時不必重算其他指標）。"""
+    out = strength.copy()
+    breadth = out.pivot(index="date", columns="group", values="pct_above_ma20")
+    rising = (breadth > breadth.shift(cfg.strong_breadth_lookback)).stack()
+    rising = rising.reindex(pd.MultiIndex.from_frame(out[["date", "group"]])).fillna(False)
     out["is_strong"] = (
         (out["pct_above_ma20"] >= cfg.strong_pct_above_ma20)
         & (out["group_rank"] >= cfg.strong_rank)
-        & rising.reindex(out.swaplevel().index).fillna(False).to_numpy().astype(bool)
+        & rising.to_numpy().astype(bool)
     )
-
-    out = out.reset_index()[["date", "group"] + METRIC_COLS]
-    out["n_members"] = out["n_members"].astype(int)
-    return out.sort_values(["date", "group"]).reset_index(drop=True)
+    return out
 
 
 def strong_turn_events(strength: pd.DataFrame) -> pd.DataFrame:

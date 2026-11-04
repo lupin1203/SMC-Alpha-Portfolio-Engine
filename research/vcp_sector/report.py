@@ -89,8 +89,9 @@ def plot_strength_heatmap(strength: pd.DataFrame, metric: str = "group_rank",
     return fig
 
 
-def build_strength(groups_mode: str = "official", synthetic: bool = False, use_api: bool = True,
-                   cfg=DEFAULT_CONFIG) -> pd.DataFrame:
+def load_inputs(groups_mode: str = "official", synthetic: bool = False, use_api: bool = True,
+                cfg=DEFAULT_CONFIG) -> dict:
+    """讀資料 → 分群 → 可交易池 → 族群強度。heatmap 與 backtest 共用。"""
     if synthetic:
         from .synthetic import make_synthetic_market
 
@@ -100,7 +101,7 @@ def build_strength(groups_mode: str = "official", synthetic: bool = False, use_a
         prices = load_prices(info["stock_id"], cfg.data, use_api=use_api)
         if prices.empty:
             raise SystemExit("沒有任何價格資料：請先跑 update_data.py 建 local_data/，"
-                             "或設定 FINMIND_TOKEN，或用 --synthetic 檢查流程。")
+                             "或確認網路可連 yfinance，或用 --synthetic 檢查流程。")
         bench = load_benchmark(cfg.data, use_api=use_api)
 
     universe = set(prices["stock_id"].unique())
@@ -111,7 +112,14 @@ def build_strength(groups_mode: str = "official", synthetic: bool = False, use_a
 
     close = to_wide(prices, "close")
     elig = eligibility_mask(prices, cfg.data)
-    return compute_sector_strength(close, groups, bench, elig, cfg.sector)
+    strength = compute_sector_strength(close, groups, bench, elig, cfg.sector)
+    return {"prices": prices, "info": info, "benchmark": bench, "groups": groups,
+            "eligible": elig, "strength": strength}
+
+
+def build_strength(groups_mode: str = "official", synthetic: bool = False, use_api: bool = True,
+                   cfg=DEFAULT_CONFIG) -> pd.DataFrame:
+    return load_inputs(groups_mode, synthetic, use_api, cfg)["strength"]
 
 
 def main(argv=None):

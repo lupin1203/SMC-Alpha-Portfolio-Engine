@@ -58,9 +58,53 @@ class SectorConfig:
 
 
 @dataclass(frozen=True)
+class LeadLagConfig:
+    ret_window: int = 20
+    n_leaders: int = 2               # 龍頭：近 20 日報酬最高的 1–2 檔
+    leader_turnover_pct: float = 0.5 # 且成交值在族群內排前 50%
+    n_laggards: int = 3              # 落後：報酬 < 族群中位數、close > MA50，取最接近中位數的 3 檔
+    ma_long: int = 50
+
+
+@dataclass(frozen=True)
+class TradeConfig:
+    """進出場規則：事先固定，不做優化。"""
+    stop_lookback: int = 10          # 停損 = 訊號日（含）前 10 日最低價（訊號 B 用；VCP 會用自己的 stop）
+    max_risk_pct: float = 0.15       # 進場價到停損距離 > 15% 的不做（R 太大、部位太小）
+    min_risk_pct: float = 0.01       # < 1% 的停損太近，R 會被雜訊放大，也不做
+    trail_pct: float = 0.10          # 移動停利：收盤 < 進場後最高收盤 × (1 − 10%) → 隔日開盤出
+    exit_ma: int = 20                # 收盤由上往下跌破 MA20 → 隔日開盤出
+    max_hold_days: int = 120         # 時間停損
+    fee_rate: float = 0.001425       # 與 SMC 系統 config.py 相同
+    tax_rate: float = 0.003
+    slippage: float = 0.001          # 進出各 0.1%
+
+    # 投組模擬
+    risk_per_trade: float = 0.01     # 每筆風險 = 帳戶 1%
+    max_positions: int = 10
+    max_position_pct: float = 0.20   # 單一部位上限 = 帳戶 20%
+    initial_capital: float = 1_000_000.0
+    lot_size: int = 1                # 1 = 可零股（2020 起盤中零股）；1000 = 只能整張（會偏向低價股）
+
+
+@dataclass(frozen=True)
+class WalkForwardConfig:
+    is_years: int = 3
+    oos_years: int = 1
+    min_is_trades: int = 30          # IS 交易數不足的參數組不選
+    # 敏感度 / walk-forward 的小範圍網格（族群門檻）
+    grid_pct_above_ma20: tuple = (0.5, 0.6, 0.7)
+    grid_rank: tuple = (0.6, 0.7, 0.8)
+    n_random_baseline: int = 20
+
+
+@dataclass(frozen=True)
 class Config:
     data: DataConfig = field(default_factory=DataConfig)
     sector: SectorConfig = field(default_factory=SectorConfig)
+    leadlag: LeadLagConfig = field(default_factory=LeadLagConfig)
+    trade: TradeConfig = field(default_factory=TradeConfig)
+    wf: WalkForwardConfig = field(default_factory=WalkForwardConfig)
 
 
 DEFAULT_CONFIG = Config()
