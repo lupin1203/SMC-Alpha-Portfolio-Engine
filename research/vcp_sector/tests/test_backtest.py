@@ -151,3 +151,29 @@ def test_no_chase_above_max_entry():
     assert simulate_trades(p, sig, NOCOST).empty
     sig = _sig(d[1], 9.0).assign(max_entry=11.5)
     assert len(simulate_trades(p, sig, NOCOST)) == 1
+
+
+def test_fixed_close_exit_and_pct_stop():
+    cfg = TradeConfig(fee_rate=0, tax_rate=0, slippage=0, exit_mode="fixed_close", fixed_hold_days=3)
+    p, d = _panel(o=[10, 10, 10, 11, 12, 13, 14], h=[10.5] * 3 + [11.5, 12.5, 13.5, 14.5],
+                  l=[9.5] * 3 + [10.5, 11.5, 12.5, 13.5], c=[10, 10, 10.2, 11.2, 12.2, 13.2, 14.2])
+    sig = _sig(d[1], np.nan).assign(stop_pct=0.10)
+    t = simulate_trades(p, sig, cfg).iloc[0]
+    assert t.entry_date == d[2] and t.stop_price == pytest.approx(9.0)
+    assert t.exit_reason == "time_close" and t.exit_date == d[4] and t.exit_price == 12.2   # 第 3 日收盤
+
+
+def test_intraday_stop_does_not_free_slot_for_same_day_open():
+    p, d = _panel(o=[100] * 6, h=[101] * 6, l=[99] * 6, c=[100] * 6)
+    base = {"signal_date": d[0], "group": "G", "variant": "B", "entry_price": 100.0, "stop_price": 90.0,
+            "exit_price": 90.0, "hold_days": 1, "ret": 0.0, "r": -1.0}
+    tr = pd.DataFrame([
+        base | {"stock_id": "X", "entry_date": d[1], "exit_date": d[3], "exit_reason": "stop"},
+        base | {"stock_id": "X", "entry_date": d[3], "exit_date": d[5], "exit_reason": "time_close"},
+    ])
+    cfg = TradeConfig(fee_rate=0, tax_rate=0, slippage=0, max_positions=1, sizing="equal")
+    _, taken = simulate_portfolio(p, tr, cfg)
+    assert len(taken) == 1          # d[3] 開盤時第一筆還沒停損，名額未釋放
+    tr.loc[0, "exit_reason"] = "trail"    # 若是「開盤出場」就可以在同日開盤換股
+    _, taken = simulate_portfolio(p, tr, cfg)
+    assert len(taken) == 2

@@ -57,16 +57,22 @@ def simulate_trades(panel: StockPanel, signals: pd.DataFrame,
         if busy_until.get(key, -1) >= i:
             continue
         e = i + 1
-        stop = sig.stop_price
-        if not np.isfinite(O[e, j]) or not np.isfinite(stop):
+        if not np.isfinite(O[e, j]):
             continue
         max_entry = getattr(sig, "max_entry", np.nan)
         if np.isfinite(max_entry) and O[e, j] > max_entry:   # 跳空離 pivot 太遠：不追
             continue
         entry = O[e, j] * (1 + tcfg.slippage)
-        risk = (entry - stop) / entry
-        if not (tcfg.min_risk_pct <= risk <= tcfg.max_risk_pct):
-            continue
+        stop_pct = getattr(sig, "stop_pct", np.nan)
+        if np.isfinite(stop_pct):                            # 固定百分比停損（相對進場價）
+            stop = entry * (1 - stop_pct)
+        else:
+            stop = sig.stop_price
+            if not np.isfinite(stop):
+                continue
+            risk = (entry - stop) / entry
+            if not (tcfg.min_risk_pct <= risk <= tcfg.max_risk_pct):
+                continue
 
         hi = -np.inf
         pending = None
@@ -81,6 +87,11 @@ def simulate_trades(panel: StockPanel, signals: pd.DataFrame,
                 exit_px = stop if d == e else min(O[d, j], stop)
                 reason, d_exit = "stop", d
                 break
+            if tcfg.exit_mode == "fixed_close":
+                if d - e + 1 >= tcfg.fixed_hold_days:      # 第 N 個交易日收盤出場
+                    exit_px, reason, d_exit = C[d, j], "time_close", d
+                    break
+                continue
             hi = max(hi, C[d, j])
             if C[d, j] < hi * (1 - tcfg.trail_pct):
                 pending = "trail"
@@ -177,26 +188,31 @@ def simulate_portfolio(panel: StockPanel, trades: pd.DataFrame,
     for k in range(start, len(panel.dates)):
         d = panel.dates[k]
         # 1) 開盤：上一日收盤觸發、今日開盤出場的部位先出（exit_date == d 且非當日進場者）
-        positions = _close_positions(positions, d, tcfg, cost_out, cash_box := [cash])
+        positions = _close_positions(positions, d, tcfg, cost_out, cash_box := [cash], at_open=True)
         cash = cash_box[0]
         eq_open = cash + sum(p["shares"] * C[k - 1 if k else k, p["j"]] for p in positions)
         # 2) 開盤進場
         if d in entries:
+            n_new = 0
             for t in entries[d].itertuples(index=False):
-                if len(positions) >= tcfg.max_positions:
+                if len(positions) >= tcfg.max_positions or n_new >= tcfg.max_new_per_day:
                     break
-                risk_ps = t.entry_price - t.stop_price
-                shares = tcfg.risk_per_trade * eq_open / risk_ps
-                shares = min(shares, tcfg.max_position_pct * eq_open / t.entry_price,
-                             cash / (t.entry_price * cost_in))
+                if tcfg.sizing == "equal":                  # 資金等分（例如 4 份）
+                    shares = eq_open / tcfg.max_positions / t.entry_price
+                else:                                       # 固定風險
+                    shares = tcfg.risk_per_trade * eq_open / (t.entry_price - t.stop_price)
+                    shares = min(shares, tcfg.max_position_pct * eq_open / t.entry_price)
+                shares = min(shares, cash / (t.entry_price * cost_in))
                 shares = np.floor(shares / tcfg.lot_size) * tcfg.lot_size
                 if shares <= 0:
                     continue
                 cash -= shares * t.entry_price * cost_in
                 positions.append({"j": panel.col[t.stock_id], "shares": shares,
-                                  "exit_date": t.exit_date, "exit_price": t.exit_price})
+                                  "exit_date": t.exit_date, "exit_price": t.exit_price,
+                                  "at_open": t.exit_reason in OPEN_EXITS})
                 taken.append(t._asdict() | {"shares": shares})
-        # 3) 盤中：當日觸及停損（含進場當日就停損）的部位出場
+                n_new += 1
+        # 3) 盤中 / 收盤：停損（含進場當日）與收盤出場的部位
         positions = _close_positions(positions, d, tcfg, cost_out, cash_box := [cash])
         cash = cash_box[0]
         equity[k] = cash + sum(p["shares"] * C[k, p["j"]] for p in positions)
@@ -204,14 +220,20 @@ def simulate_portfolio(panel: StockPanel, trades: pd.DataFrame,
     return eq, pd.DataFrame(taken)
 
 
-def _close_positions(positions, d, tcfg, cost_out, cash_box):
+OPEN_EXITS = {"trail", "ma_break", "time"}   # 前一日收盤觸發、今日「開盤」出場
+
+
+def _close_positions(positions, d, tcfg, cost_out, cash_box, at_open: bool = False):
+    """at_open=True：只結算今日開盤出場者（資金與名額可供今日開盤進場使用）；
+    盤中停損與收盤出場要等進場之後才結算，不能拿來在今天開盤買別的股票。"""
     still = []
     for p in positions:
-        if p["exit_date"] <= d:
+        due = p["exit_date"] < d or (p["exit_date"] == d and (p["at_open"] or not at_open))
+        if due:
             cash_box[0] += p["shares"] * p["exit_price"] * (1 - tcfg.slippage) * cost_out
         else:
             still.append(p)
-    if any(p["exit_date"] < d for p in positions):
+    if any(p["exit_date"] < d for p in still):
         raise AssertionError("部位出場日早於當日，投組模擬順序錯誤")
     return still
 

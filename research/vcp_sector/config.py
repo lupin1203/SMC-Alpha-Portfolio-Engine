@@ -106,6 +106,8 @@ class TradeConfig:
     trail_pct: float = 0.10          # 移動停利：收盤 < 進場後最高收盤 × (1 − 10%) → 隔日開盤出
     exit_ma: int = 20                # 收盤由上往下跌破 MA20 → 隔日開盤出
     max_hold_days: int = 120         # 時間停損
+    exit_mode: str = "trail"         # "trail"（上述移動停利規則）或 "fixed_close"（第 N 日收盤出場）
+    fixed_hold_days: int = 5
     fee_rate: float = 0.001425       # 與 SMC 系統 config.py 相同
     tax_rate: float = 0.003
     slippage: float = 0.001          # 進出各 0.1%
@@ -113,6 +115,8 @@ class TradeConfig:
     # 投組模擬
     risk_per_trade: float = 0.01     # 每筆風險 = 帳戶 1%
     max_positions: int = 10
+    max_new_per_day: int = 99
+    sizing: str = "risk"             # "risk"（固定風險）或 "equal"（資金等分 max_positions 份）
     max_position_pct: float = 0.20   # 單一部位上限 = 帳戶 20%
     initial_capital: float = 1_000_000.0
     lot_size: int = 1                # 1 = 可零股（2020 起盤中零股）；1000 = 只能整張（會偏向低價股）
