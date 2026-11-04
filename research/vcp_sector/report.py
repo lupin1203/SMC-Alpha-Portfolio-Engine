@@ -35,8 +35,12 @@ METRIC_LABELS = {
 
 
 def plot_strength_heatmap(strength: pd.DataFrame, metric: str = "group_rank",
-                          title: str | None = None, last_n_days: int | None = None):
-    """族群 × 日期熱力圖。is_strong 的格子用 ★ 標記。回傳 plotly Figure。"""
+                          title: str | None = None, last_n_days: int | None = None,
+                          resample: str | None = None):
+    """族群 × 日期熱力圖。is_strong 的格子用 ★ 標記。回傳 plotly Figure。
+
+    resample="W"：週資料（指標取週平均，★ = 該週任一日 is_strong），長期間比較好看。
+    """
     import plotly.graph_objects as go
 
     df = strength.copy()
@@ -44,10 +48,16 @@ def plot_strength_heatmap(strength: pd.DataFrame, metric: str = "group_rank",
         keep = sorted(df["date"].unique())[-last_n_days:]
         df = df[df["date"].isin(keep)]
     z = df.pivot(index="group", columns="date", values=metric)
-    # 去掉暖機期（全 NaN 的日期）與從未達成員門檻的族群
-    z = z.dropna(axis=1, how="all").dropna(axis=0, how="all")
     strong = df.pivot(index="group", columns="date", values="is_strong").reindex_like(z)
     members = df.pivot(index="group", columns="date", values="n_members").reindex_like(z)
+    if resample:
+        rule = "W-FRI" if resample.upper() == "W" else resample
+        z = z.T.resample(rule).mean().T
+        strong = strong.astype(float).T.resample(rule).max().T.reindex_like(z)
+        members = members.T.resample(rule).last().T.reindex_like(z)
+    # 去掉暖機期（全 NaN 的日期）與從未達成員門檻的族群
+    z = z.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    strong, members = strong.reindex_like(z), members.reindex_like(z)
 
     # 依最近一日的指標排序，強的在上
     order = z.iloc[:, -1].fillna(-1e9).sort_values().index
@@ -111,6 +121,7 @@ def main(argv=None):
     p.add_argument("--no-api", action="store_true", help="只讀快取，不呼叫 FinMind")
     p.add_argument("--metric", default="group_rank", choices=list(METRIC_LABELS))
     p.add_argument("--last-n-days", type=int, default=None)
+    p.add_argument("--resample", default=None, help="W = 週資料（看長期間用）；預設：超過 500 日自動用週")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -124,7 +135,9 @@ def main(argv=None):
     title = None
     if args.synthetic:
         title = f"【人造資料】族群強度熱力圖：{METRIC_LABELS[args.metric]}（★ = 轉強）"
-    fig = plot_strength_heatmap(strength, args.metric, title, args.last_n_days)
+    n_days = args.last_n_days or strength["date"].nunique()
+    resample = args.resample or ("W" if n_days > 500 else None)
+    fig = plot_strength_heatmap(strength, args.metric, title, args.last_n_days, resample)
     fig.write_html(html_path, include_plotlyjs="cdn")
 
     last = strength[strength["date"] == strength["date"].max()]

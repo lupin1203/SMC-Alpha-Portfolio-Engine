@@ -22,6 +22,9 @@ class DataConfig:
     finmind_url: str = "https://api.finmindtrade.com/api/v4/data"
     finmind_token_env: str = "FINMIND_TOKEN"
     start_date: str = "2015-01-01"
+    yf_batch_size: int = 100
+    session_close: str = "14:30"   # 台北時間此時之後才視為今日 K 棒完成（收盤 13:30，留緩衝）
+    max_stale_bdays: int = 3       # 本模組快取落後超過 N 個營業日就重新下載
 
     # 大盤：優先 FinMind 的 TAIEX 指數，取不到就退回 0050（與既有 SMC 系統一致）
     benchmark_id: str = "TAIEX"
