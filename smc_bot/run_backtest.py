@@ -21,6 +21,7 @@ GRID = dict(
     rr=[1.5, 2.0, 3.0],
     use_htf=[True, False],
     only_choch=[True, False],
+    entry_mode=["limit", "confirm"],
 )
 
 _cache = {}

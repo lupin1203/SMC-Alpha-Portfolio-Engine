@@ -183,36 +183,7 @@ updateZones(array<Zone> arr, bool isFvg) =>
                     z.bx.set_right(bar_index + 1)
 
 // ───────────── 主邏輯 ─────────────
-updateZones(obZones, false)
-updateZones(fvgZones, true)
-
-bool bullChochNow = false
-bool bearChochNow = false
-
-srcUp = useClose ? close : high
-srcDn = useClose ? close : low
-
-if canConfirm and not sHUsed and srcUp > sH
-    isChoch = trend <= 0
-    if isChoch or showBOS
-        drawStruct(sH, sHBar, isChoch ? "CHoCH" : "BOS", true)
-    if (isChoch or not onlyChoch) and allowDir(1)
-        makeZones(true, sHBar)
-    bullChochNow := isChoch
-    sHUsed := true
-    trend  := 1
-
-if canConfirm and not sLUsed and srcDn < sL
-    isChoch = trend >= 0
-    if isChoch or showBOS
-        drawStruct(sL, sLBar, isChoch ? "CHoCH" : "BOS", false)
-    if (isChoch or not onlyChoch) and allowDir(-1)
-        makeZones(false, sLBar)
-    bearChochNow := isChoch
-    sLUsed := true
-    trend  := -1
-
-// ───────────── 回測 OB → 進場框 ─────────────
+// ───────────── 回測 OB → 進場框 (先判斷成交，再判斷失效：與真實掛單一致) ─────────────
 bool longEntry  = false
 bool shortEntry = false
 if showTrade and canConfirm and obZones.size() > 0
@@ -244,6 +215,36 @@ if showTrade and canConfirm and obZones.size() > 0
                          bgcolor=color.new(color.teal, 70), text="TP " + str.tostring(tp, format.mintick) + " (" + str.tostring(rr) + "R)",
                          text_color=color.white, text_size=size.tiny, text_valign=text.align_top)
                     longEntry := true
+
+// ───────────── OB / FVG 失效判斷 ─────────────
+updateZones(obZones, false)
+updateZones(fvgZones, true)
+
+bool bullChochNow = false
+bool bearChochNow = false
+
+srcUp = useClose ? close : high
+srcDn = useClose ? close : low
+
+if canConfirm and not sHUsed and srcUp > sH
+    isChoch = trend <= 0
+    if isChoch or showBOS
+        drawStruct(sH, sHBar, isChoch ? "CHoCH" : "BOS", true)
+    if (isChoch or not onlyChoch) and allowDir(1)
+        makeZones(true, sHBar)
+    bullChochNow := isChoch
+    sHUsed := true
+    trend  := 1
+
+if canConfirm and not sLUsed and srcDn < sL
+    isChoch = trend >= 0
+    if isChoch or showBOS
+        drawStruct(sL, sLBar, isChoch ? "CHoCH" : "BOS", false)
+    if (isChoch or not onlyChoch) and allowDir(-1)
+        makeZones(false, sLBar)
+    bearChochNow := isChoch
+    sLUsed := true
+    trend  := -1
 
 // ───────────── 高週期方向面板 ─────────────
 var table htfTbl = table.new(position.top_right, 1, 1)

@@ -30,6 +30,8 @@ class Params:
     htf_swing: int = 5
     only_choch: bool = True
     max_zones: int = 5
+    # "limit": 碰到 OB 就限價成交; "confirm": 碰到後等K棒收盤回到 OB 外才市價進場
+    entry_mode: str = "limit"
     # 成本 (OKX 永續一般等級): 限價 maker 0.02%, 停損市價 taker 0.05% + 滑價
     maker_fee: float = 0.0002
     taker_fee: float = 0.0005
@@ -47,6 +49,7 @@ class Trade:
     exit: float = np.nan
     r_gross: float = np.nan
     r_net: float = np.nan
+    entry_fee: float = 0.0002
 
 
 def load_csv(path: str) -> pd.DataFrame:
@@ -120,7 +123,7 @@ def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params) -> list[Trade]:
     sH_used = sL_used = True
     iH_bar = iL_bar = -1
     trend = 0
-    zones: list[list] = []  # [top, bot, dir, active, traded, born]
+    zones: list[list] = []  # [top, bot, dir, active, traded, born, armed, extreme]
     trades: list[Trade] = []
     pos: Trade | None = None
 
@@ -171,9 +174,39 @@ def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params) -> list[Trade]:
                 trades.append(pos)
                 pos = None
 
+        # 3b) 確認進場: 已碰過 OB 的區塊, 收盤回到 OB 外 → 收盤價市價進場
+        if p.entry_mode == "confirm":
+            for z in zones:
+                top, bot, d, active, traded, born, armed, ext = z
+                if not active or traded or i <= born:
+                    continue
+                touched = (l[i] <= top) if d == 1 else (h[i] >= bot)
+                if not armed and touched:
+                    z[6], z[7] = True, (l[i] if d == 1 else h[i])
+                elif armed:
+                    z[7] = min(ext, l[i]) if d == 1 else max(ext, h[i])
+                if not z[6]:
+                    continue
+                if d == 1 and c[i] <= bot or d == -1 and c[i] >= top:
+                    continue  # 收盤穿過 → 下面第 4 步會判定失效
+                confirmed = (c[i] > top) if d == 1 else (c[i] < bot)
+                if not confirmed:
+                    continue
+                z[4] = True
+                if pos is not None or not allow(d):
+                    continue
+                entry = c[i]
+                if d == 1:
+                    sl = min(bot, z[7]) * (1 - p.sl_buf_pct / 100)
+                    tp = entry + p.rr * (entry - sl)
+                else:
+                    sl = max(top, z[7]) * (1 + p.sl_buf_pct / 100)
+                    tp = entry - p.rr * (sl - entry)
+                pos = Trade(d, i, entry, sl, tp, entry_fee=p.taker_fee + p.sl_slippage)
+
         # 3) 限價單成交: 價格回到仍有效的 OB
-        for z in zones:
-            top, bot, d, active, traded, born = z
+        for z in (zones if p.entry_mode == "limit" else []):
+            top, bot, d, active, traded, born = z[:6]
             if not active or traded or i <= born:
                 continue
             tapped = (l[i] <= top) if d == 1 else (h[i] >= bot)
@@ -211,13 +244,13 @@ def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params) -> list[Trade]:
             is_choch = trend <= 0
             if (is_choch or not p.only_choch) and allow(1):
                 k = find_ob(i, True, sH_bar)
-                zones.append([h[i - k], l[i - k], 1, True, False, i])
+                zones.append([h[i - k], l[i - k], 1, True, False, i, False, np.nan])
             sH_used, trend = True, 1
         if not sL_used and c[i] < sL:
             is_choch = trend >= 0
             if (is_choch or not p.only_choch) and allow(-1):
                 k = find_ob(i, False, sL_bar)
-                zones.append([h[i - k], l[i - k], -1, True, False, i])
+                zones.append([h[i - k], l[i - k], -1, True, False, i, False, np.nan])
             sL_used, trend = True, -1
         if len(zones) > p.max_zones:
             del zones[: len(zones) - p.max_zones]
@@ -230,7 +263,7 @@ def _close(t: Trade, i: int, px: float, is_tp: bool, p: Params):
     move = (px - t.entry) * t.dir
     t.r_gross = move / risk
     exit_cost = p.maker_fee if is_tp else (p.taker_fee + p.sl_slippage)
-    cost = t.entry * p.maker_fee + px * exit_cost
+    cost = t.entry * t.entry_fee + px * exit_cost
     t.r_net = (move - cost) / risk
 
 
