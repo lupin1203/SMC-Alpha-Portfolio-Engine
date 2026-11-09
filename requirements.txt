@@ -6,3 +6,4 @@ plotly
 requests
 urllib3
 pyarrow
+tabulate

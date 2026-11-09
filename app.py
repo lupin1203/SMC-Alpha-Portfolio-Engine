@@ -47,6 +47,7 @@ from database import init_db, save_backtest_record, load_history, save_backtest_
 from monte_carlo import run_monte_carlo
 from portfolio_engine import run_portfolio_backtest
 from regime import ALL_REGIMES, DEFAULT_ALLOWED_REGIMES, add_regime_columns
+from config import HOLDOUT_START
 
 # 對齊 kwargs，讓選配參數安全送達底層
 @st.cache_data(ttl=3600)
@@ -328,6 +329,24 @@ with tab3:
         p_vol = st.checkbox("要求起漲爆量", value=False, key="pvol_chk")
         p_atr = st.checkbox("強勢實體位移", value=False, key="patr_chk")
         p_bos = st.checkbox("突破近期新高", value=False, key="pbos_chk")
+
+        with st.expander("研究設定 (真實度 / 考試期 / 對照組)", expanded=False):
+            p_period_label = st.radio(
+                "回測期間",
+                [f"研究期 (< {HOLDOUT_START})", f"考試期 (≥ {HOLDOUT_START})", "全期間"],
+                key="p_period",
+                help="考試期保留作最後驗證：參數全部定案後只看一次，看過後再改參數，考試期就失效了。")
+            p_period = {0: "in_sample", 1: "holdout", 2: "all"}[
+                [f"研究期 (< {HOLDOUT_START})", f"考試期 (≥ {HOLDOUT_START})", "全期間"].index(p_period_label)]
+            if p_period == "holdout":
+                st.warning("你正在看考試期。請確認參數已經全部定案。")
+            p_realistic = st.checkbox("實盤真實模式", value=False, key="p_realistic",
+                                      help="隔日觸價進場、漲停買不到、跌停賣不掉、10 天保護期 + 2R 緊急停損、同檔不重複、K 棒內順序修正、期末結算未平倉部位")
+            p_protect = st.number_input("保護期天數 (0 = 關閉)", 0, 30, 10, key="p_protect", disabled=not p_realistic)
+            p_max_pos_pct = st.slider("單筆資金上限 (% 淨值，100 = 不限)", 5, 100, 20 if p_realistic else 100, 5, key="p_max_pos_pct")
+            p_random = st.checkbox("隨機進場對照組", value=False, key="p_random",
+                                   help="訊號數量不變、日期隨機，出場規則不變。用來檢驗 FVG 進場是否真的有優勢。")
+            p_seed = st.number_input("隨機種子", 0, 9999, 0, key="p_seed", disabled=not p_random)
         
         run_portfolio = st.button(" 執行組合驗證", type="primary", use_container_width=True)
 
@@ -344,10 +363,18 @@ with tab3:
                 
                 with st.spinner(f"正在平行運算 {len(tickers_to_test)} 檔標的，請稍候..."):
                     p_df, p_stats, bm_df = get_cached_portfolio_results(
-                        tickers_to_test, p_years, p_mode, p_val, p_gap, p_sma,
-                        p_vol, p_atr, p_bos, 0.002, 0.28, 1000, 
-                        p_max_pos, p_max_sec, sector_map, p_risk, p_cap, p_account_dd,
-                        tuple(p_regimes) if p_regimes else None
+                        tickers=tickers_to_test, years=p_years, bt_mode=p_mode, bt_val=p_val,
+                        gap_pct=p_gap, use_sma=p_sma,
+                        use_vol_filter=p_vol, use_atr_filter=p_atr, use_bos_filter=p_bos,
+                        slippage_pct=0.002, fee_disc=0.28, min_vol=1000,
+                        max_concurrent=p_max_pos, max_per_sector=p_max_sec, sector_map=sector_map,
+                        risk_pct=p_risk, initial_capital=p_cap, account_dd_limit=p_account_dd,
+                        allowed_regimes=tuple(p_regimes) if p_regimes else None,
+                        period=p_period,
+                        realistic=p_realistic,
+                        protection_days=int(p_protect) if p_realistic else None,
+                        max_position_pct=None if p_max_pos_pct >= 100 else p_max_pos_pct / 100.0,
+                        random_entry=p_random, random_seed=int(p_seed),
                     )
                     
                     if p_stats and not p_df.empty:

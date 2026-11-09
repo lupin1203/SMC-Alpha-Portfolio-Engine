@@ -78,3 +78,26 @@ def apply_smc_logic(df, min_gap_pct, use_sma_filter, **kwargs):
         use_sma_filter=use_sma_filter,
         **kwargs
     )
+
+def randomize_signals(df, seed=0, salt="", warmup=60):
+    """
+    隨機進場對照組：保留原本的訊號「數量」，但把訊號日期隨機打散到其他交易日，
+    停損距離改用與原策略相同的下限規則 (收盤價 3%)。
+    出場規則完全不變，所以若隨機版績效與原策略差不多，代表 FVG 進場訊號本身沒有貢獻。
+
+    seed + salt (例如股票代號) 決定亂數，確保結果可重現、且跨進程一致。
+    """
+    import zlib
+    df = df.copy()
+    n_signals = int(df['FVG'].fillna(False).sum()) if 'FVG' in df.columns else 0
+    df['FVG'] = False
+    if n_signals == 0 or len(df) <= warmup:
+        return df
+    rng = np.random.default_rng(zlib.crc32(f"{salt}|{seed}".encode("utf-8")))
+    candidates = np.arange(warmup, len(df))
+    picks = rng.choice(candidates, size=min(n_signals, len(candidates)), replace=False)
+    fvg = np.zeros(len(df), dtype=bool)
+    fvg[picks] = True
+    df['FVG'] = fvg
+    df['adjusted_risk'] = df['Close'] * 0.03
+    return df

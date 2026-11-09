@@ -5,8 +5,9 @@ import pandas as pd
 import numpy as np
 import logging
 import traceback
-from strategy import apply_smc_logic
-from backtest_engine import run_backtest_core
+from strategy import apply_smc_logic, randomize_signals
+from backtest_engine import run_backtest_core, REALISM_DEFAULTS
+from config import HOLDOUT_START
 from data_provider import fetch_stock_data
 from regime import add_regime_columns, regime_at, DEFAULT_ALLOWED_REGIMES
 
@@ -32,8 +33,13 @@ def _pure_calc_worker(ticker, df_raw, **kwargs):
             use_sma_filter=use_sma,
             **kwargs 
         )
+
+        # 🎲 隨機進場對照組：訊號數量不變、日期隨機
+        if kwargs.get('random_entry', False):
+            df_logic = randomize_signals(df_logic, seed=kwargs.get('random_seed', 0), salt=ticker)
         
-        # 執行回測
+        # 執行回測 (真實度選項：realistic 預設 + 個別覆寫)
+        realism_overrides = {k: kwargs[k] for k in REALISM_DEFAULTS if k in kwargs}
         res = run_backtest_core(
             df=df_logic, 
             bt_mode=kwargs.get('bt_mode', 'R倍數'), 
@@ -41,7 +47,9 @@ def _pure_calc_worker(ticker, df_raw, **kwargs):
             slippage_pct=kwargs.get('slippage_pct', 0.002), 
             fee_disc=kwargs.get('fee_disc', 0.28),
             tax_rate=0.003,       
-            min_vol=kwargs.get('min_vol', 1000)
+            min_vol=kwargs.get('min_vol', 1000),
+            realistic=kwargs.get('realistic', False),
+            **realism_overrides
         )
         
         if res[0] is not None and not res[0].empty:
@@ -50,7 +58,8 @@ def _pure_calc_worker(ticker, df_raw, **kwargs):
             trades_df['板塊'] = kwargs.get('sector_map', {}).get(ticker, 'Unknown')
             
             # 🌟 審計優化：使用精準的 .loc 映射，杜絕 get_indexer 的 -1 錯位問題
-            entry_dates = pd.to_datetime(trades_df['日期'])
+            # 排序分數用「訊號日」的資料 (隔日進場模式下，成交日的成交量在下單當下還看不到)
+            entry_dates = pd.to_datetime(trades_df['訊號日'] if '訊號日' in trades_df.columns else trades_df['日期'])
             
             if 'Score_VolSurge' in df_raw.columns:
                 trades_df['Alpha動能分數'] = df_raw.loc[entry_dates, 'Score_VolSurge'].values
@@ -70,7 +79,18 @@ def _pure_calc_worker(ticker, df_raw, **kwargs):
     return None
 
 def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, slippage_pct, fee_disc, min_vol, max_concurrent=5, max_per_sector=2, sector_map=None, risk_pct=2.0, initial_capital=1000000.0, account_dd_limit=0.20, allowed_regimes=DEFAULT_ALLOWED_REGIMES, **kwargs):
-    """allowed_regimes: 允許進場的市場環境清單；傳入 None 代表不過濾。"""
+    """
+    allowed_regimes: 允許進場的市場環境清單；傳入 None 代表不過濾。
+    period: "all" 全期間 / "in_sample" 研究期 (HOLDOUT_START 之前) / "holdout" 考試期 (只計 HOLDOUT_START 之後的訊號)
+    max_position_pct: 單筆投入資金上限 (佔已實現淨值比例，例如 0.2)；None = 不限制
+    其他 kwargs：realistic、REALISM_DEFAULTS 中的個別選項、random_entry、random_seed 會傳給個股回測。
+    """
+    period = kwargs.pop('period', 'all')
+    max_position_pct = kwargs.pop('max_position_pct', None)
+    one_per_ticker = kwargs.get('one_position_per_ticker', kwargs.get('realistic', False))
+    holdout_ts = pd.Timestamp(HOLDOUT_START)
+    if period not in ('all', 'in_sample', 'holdout'):
+        raise ValueError(f"未知的 period: {period}")
     
     print(f"\n==========================================")
     print(f"⚙️ [組合回測引擎] 啟動！接收 {len(tickers)} 檔標的。")
@@ -80,8 +100,14 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
     raw_data_dict = {}
     all_trades = []
     
+    def _clip_period(df):
+        # 研究期：直接截斷在考試期之前，確保考試期資料完全不參與運算
+        if df is not None and period == 'in_sample':
+            df = df[df.index < holdout_ts]
+        return df
+
     def _fetch_worker(t):
-        df = fetch_stock_data(t, days=years * 365)
+        df = _clip_period(fetch_stock_data(t, days=years * 365))
         if df is not None and not df.empty and len(df) >= 100:
             return t, df
         return t, None
@@ -97,7 +123,7 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         print("❌ 錯誤：資料抓取失敗或全數為空。")
         return pd.DataFrame(), None, pd.DataFrame()
 
-    market_df = fetch_stock_data("0050.TW", days=years*365)
+    market_df = _clip_period(fetch_stock_data("0050.TW", days=years*365))
     if market_df is not None and not market_df.empty:
         market_df = add_regime_columns(market_df)
     else:
@@ -131,6 +157,13 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         return pd.DataFrame(), None, pd.DataFrame()
 
     raw_portfolio_df = pd.concat(all_trades).reset_index(drop=True)
+    if period == 'holdout':
+        # 考試期：用完整資料計算指標 (避免均線暖機不足)，但只保留考試期內發出的訊號
+        sig_col = '訊號日' if '訊號日' in raw_portfolio_df.columns else '日期'
+        raw_portfolio_df = raw_portfolio_df[pd.to_datetime(raw_portfolio_df[sig_col]) >= holdout_ts].reset_index(drop=True)
+        if raw_portfolio_df.empty:
+            print("❌ 錯誤：考試期內沒有任何訊號。")
+            return pd.DataFrame(), None, pd.DataFrame()
     raw_portfolio_df['真實進場日'] = pd.to_datetime(raw_portfolio_df['日期'])
     
     actual_taken_trades = []
@@ -190,6 +223,9 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
                 if len(active_positions) >= max_concurrent:
                     continue 
 
+                if one_per_ticker and any(p['ticker'] == trade['標的'] for p in active_positions):
+                    continue
+
                 current_sec_count = sum(1 for p in active_positions if p['sector'] == trade_sec)
                 if current_sec_count >= max_per_sector:
                     continue
@@ -215,6 +251,10 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
                     planned_shares = int(liquidity_limit_cash / trade['進場'])
                     required_cash = planned_shares * trade['進場']
 
+                if max_position_pct and required_cash > realized_equity * max_position_pct:
+                    planned_shares = int(realized_equity * max_position_pct / trade['進場'])
+                    required_cash = planned_shares * trade['進場']
+
                 if required_cash > cash:
                     planned_shares = int(cash / trade['進場'])
                     required_cash = planned_shares * trade['進場']
@@ -234,6 +274,7 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
                 active_positions.append({
                     'exit_time': exit_time, 
                     'sector': trade_sec,
+                    'ticker': trade['標的'],
                     'invested_cash': required_cash,
                     'returned_cash': returned_cash,
                     'net_profit': expected_net_profit
@@ -315,6 +356,9 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         "市場環境過濾淘汰次數": regime_rejected,
         "風控與資金不足淘汰次數": len(raw_portfolio_df) - total_trades - regime_rejected,
         "允許進場環境": "、".join(sorted(regime_filter)) if regime_filter else "不過濾",
+        "回測期間": {"all": "全期間", "in_sample": f"研究期 (< {HOLDOUT_START})", "holdout": f"考試期 (≥ {HOLDOUT_START})"}[period],
+        "實盤真實模式": "開" if kwargs.get('realistic', False) else "關",
+        "隨機進場對照": f"開 (seed={kwargs.get('random_seed', 0)})" if kwargs.get('random_entry', False) else "關",
         "勝率(%)": round(win_rate * 100, 2),
         "Portfolio期望值(R)": round((win_rate * avg_w) - ((1 - win_rate) * avg_l), 2),
         "平均R倍數": round(avg_r, 2),
