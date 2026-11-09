@@ -20,6 +20,7 @@ class TrendParams:
     exit_n: int = 10
     atr_mult: float = 2.0
     both: bool = False  # False = 只做多
+    short_only: bool = False
     fee: float = 0.0005
     slippage: float = 0.0002
     funding_8h: float = 0.0001
@@ -70,9 +71,9 @@ def backtest_trend(df: pd.DataFrame, p: TrendParams) -> list[Trade]:
         if np.isnan(hh[i]) or np.isnan(xl[i]):
             continue
         if pos is None:
-            if c[i] > hh[i]:
+            if c[i] > hh[i] and not p.short_only:
                 pending = 1
-            elif p.both and c[i] < ll[i]:
+            elif (p.both or p.short_only) and c[i] < ll[i]:
                 pending = -1
         elif (pos.dir == 1 and c[i] < xl[i]) or (pos.dir == -1 and c[i] > xh[i]):
             pending_exit = True
