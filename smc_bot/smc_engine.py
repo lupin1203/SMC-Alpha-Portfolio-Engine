@@ -32,6 +32,11 @@ class Params:
     max_zones: int = 5
     # "limit": 碰到 OB 就限價成交; "confirm": 碰到後等K棒收盤回到 OB 外才市價進場
     entry_mode: str = "limit"
+    # 流動性掃蕩: CHoCH 的走勢起點必須先刺破前一個 swing 低(高)點, 並在 sweep_bars 根內收回
+    require_sweep: bool = False
+    sweep_bars: int = 3
+    # 重大事件: "off" / "no_entry" (前後 N 小時不進場) / "flat" (再加上事件前平倉)
+    news_mode: str = "off"
     # 成本 (OKX 永續一般等級): 限價 maker 0.02%, 停損市價 taker 0.05% + 滑價
     maker_fee: float = 0.0002
     taker_fee: float = 0.0005
@@ -112,7 +117,7 @@ def map_htf(df: pd.DataFrame, htf_rule: str, swing: int) -> np.ndarray:
     return tr.reindex(bucket).fillna(0).astype(int).to_numpy()
 
 
-def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params) -> list[Trade]:
+def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params, blackout: np.ndarray | None = None) -> list[Trade]:
     o, h, l, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
     n = len(c)
     ph, pl = pivots(h, l, p.swing_len)
@@ -126,9 +131,30 @@ def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params) -> list[Trade]:
     zones: list[list] = []  # [top, bot, dir, active, traded, born, armed, extreme]
     trades: list[Trade] = []
     pos: Trade | None = None
+    swl: list[tuple[int, float]] = []  # (確認K棒, 價位) 主結構 swing low 歷史
+    swh: list[tuple[int, float]] = []
+    if blackout is None or p.news_mode == "off":
+        blackout = np.zeros(n, dtype=bool)
 
     def allow(d):
-        return (not p.use_htf) or htf_dir[i] == d
+        return ((not p.use_htf) or htf_dir[i] == d) and not blackout[i]
+
+    def swept(i, bull, broken_bar):
+        """走勢起點是否掃過前一個 swing 點的流動性 (刺破後在 sweep_bars 根內收盤收回)。"""
+        lo = max(broken_bar, 0)
+        if bull:
+            j = lo + int(np.argmin(l[lo:i + 1]))
+            hist = swl
+        else:
+            j = lo + int(np.argmax(h[lo:i + 1]))
+            hist = swh
+        lvl = next((v for cb, v in reversed(hist) if cb < j), None)
+        if lvl is None:
+            return False
+        if bull and not l[j] < lvl or not bull and not h[j] > lvl:
+            return False
+        end = min(j + p.sweep_bars, i + 1)
+        return bool(np.any(c[j:end] > lvl)) if bull else bool(np.any(c[j:end] < lvl))
 
     def find_ob(i, bull, broken_bar):
         span = min(i - broken_bar, 500)
@@ -152,12 +178,20 @@ def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params) -> list[Trade]:
         # 1) swing 點
         if not np.isnan(ph[i]):
             sH, sH_bar, sH_used = ph[i], i - p.swing_len, False
+            swh.append((i, ph[i]))
         if not np.isnan(pl[i]):
             sL, sL_bar, sL_used = pl[i], i - p.swing_len, False
+            swl.append((i, pl[i]))
         if not np.isnan(iph[i]):
             iH_bar = i - p.int_len
         if not np.isnan(ipl[i]):
             iL_bar = i - p.int_len
+
+        # 2a) 事件前平倉: 進入禁止交易時段的第一根K棒, 以開盤價市價平倉
+        if p.news_mode == "flat" and pos is not None and blackout[i] and i > 0 and not blackout[i - 1]:
+            _close(pos, i, o[i], False, p)
+            trades.append(pos)
+            pos = None
 
         # 2) 持倉出場 (同一根同時碰到 SL/TP → 保守算 SL)
         if pos is not None and i > pos.entry_i:
@@ -242,13 +276,15 @@ def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params) -> list[Trade]:
         # 5) 結構突破 → CHoCH / BOS → 新 OB
         if not sH_used and c[i] > sH:
             is_choch = trend <= 0
-            if (is_choch or not p.only_choch) and allow(1):
+            ok_sweep = (not p.require_sweep) or swept(i, True, sH_bar)
+            if (is_choch or not p.only_choch) and ((not p.use_htf) or htf_dir[i] == 1) and ok_sweep:
                 k = find_ob(i, True, sH_bar)
                 zones.append([h[i - k], l[i - k], 1, True, False, i, False, np.nan])
             sH_used, trend = True, 1
         if not sL_used and c[i] < sL:
             is_choch = trend >= 0
-            if (is_choch or not p.only_choch) and allow(-1):
+            ok_sweep = (not p.require_sweep) or swept(i, False, sL_bar)
+            if (is_choch or not p.only_choch) and ((not p.use_htf) or htf_dir[i] == -1) and ok_sweep:
                 k = find_ob(i, False, sL_bar)
                 zones.append([h[i - k], l[i - k], -1, True, False, i, False, np.nan])
             sL_used, trend = True, -1

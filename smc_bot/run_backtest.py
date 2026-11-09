@@ -9,10 +9,11 @@ from concurrent.futures import ProcessPoolExecutor
 
 import pandas as pd
 
+from events import blackout_mask
 from smc_engine import Params, backtest, load_csv, map_htf, resample, stats
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SYMBOLS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+SYMBOLS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "XRP-USDT-SWAP", "ADA-USDT-SWAP"]
 SETUPS = [("15min", "1h"), ("1h", "4h")]  # (圖表週期, 高週期)
 
 GRID = dict(
@@ -20,8 +21,10 @@ GRID = dict(
     int_len=[2, 3],
     rr=[1.5, 2.0, 3.0],
     use_htf=[True, False],
-    only_choch=[True, False],
+    only_choch=[True],
     entry_mode=["limit", "confirm"],
+    require_sweep=[False, True],
+    news_mode=["off", "no_entry", "flat"],
 )
 
 _cache = {}
@@ -42,7 +45,7 @@ def run_one(args):
     df = get_data(sym, tf, htf)
     p = Params(**kw)
     htf_dir = map_htf(df, htf, p.htf_swing)
-    trades = backtest(df, htf_dir, p)
+    trades = backtest(df, htf_dir, p, blackout_mask(df.index, 4.0))
     split = df.index[0] + (df.index[-1] - df.index[0]) / 2
     rows = []
     for name, sel in (("all", lambda t: True),
