@@ -8,6 +8,7 @@ import traceback
 from strategy import apply_smc_logic
 from backtest_engine import run_backtest_core
 from data_provider import fetch_stock_data
+from regime import add_regime_columns, regime_at, DEFAULT_ALLOWED_REGIMES
 
 # 🌟 透過 **kwargs 無腦接收所有 UI 參數
 def _pure_calc_worker(ticker, df_raw, **kwargs):
@@ -68,7 +69,8 @@ def _pure_calc_worker(ticker, df_raw, **kwargs):
         logging.error(traceback.format_exc())
     return None
 
-def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, slippage_pct, fee_disc, min_vol, max_concurrent=5, max_per_sector=2, sector_map=None, risk_pct=2.0, initial_capital=1000000.0, account_dd_limit=0.20, **kwargs):
+def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, slippage_pct, fee_disc, min_vol, max_concurrent=5, max_per_sector=2, sector_map=None, risk_pct=2.0, initial_capital=1000000.0, account_dd_limit=0.20, allowed_regimes=DEFAULT_ALLOWED_REGIMES, **kwargs):
+    """allowed_regimes: 允許進場的市場環境清單；傳入 None 代表不過濾。"""
     
     print(f"\n==========================================")
     print(f"⚙️ [組合回測引擎] 啟動！接收 {len(tickers)} 檔標的。")
@@ -96,12 +98,17 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         return pd.DataFrame(), None, pd.DataFrame()
 
     market_df = fetch_stock_data("0050.TW", days=years*365)
-    if market_df is not None:
-        market_df['SMA60'] = market_df['Close'].rolling(60).mean()
-        market_df['SMA200'] = market_df['Close'].rolling(200).mean()
-        market_df['Daily_Return'] = market_df['Close'].pct_change()
-        market_df['Volatility_20d'] = market_df['Daily_Return'].rolling(20).std() * np.sqrt(252) * 100
-        market_df['Regime'] = np.where(market_df['Close'] > market_df['SMA200'], 'Bull', 'Bear')
+    if market_df is not None and not market_df.empty:
+        market_df = add_regime_columns(market_df)
+    else:
+        market_df = None
+
+    regime_filter = set(allowed_regimes) if allowed_regimes else None
+    if regime_filter is not None and market_df is None:
+        logging.warning("無法取得 0050 大盤資料，本次回測不套用市場環境過濾。")
+        print("⚠️ 無法取得 0050 大盤資料，本次回測不套用市場環境過濾。")
+        regime_filter = None
+    regime_rejected = 0
 
     cpu_cores = max(1, multiprocessing.cpu_count() - 1)
     with ProcessPoolExecutor(max_workers=cpu_cores) as executor:
@@ -170,12 +177,12 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
             daily_signals = signals_by_date[current_date].copy()
             daily_signals = daily_signals.sort_values(by='Alpha動能分數', ascending=False)
             
-            try:
-                m_idx = market_df.index.get_indexer([current_date], method='pad')[0]
-                m_status = market_df.iloc[m_idx]
-                current_regime = m_status['Regime'] + "_" + ("HighVol" if m_status['Volatility_20d'] > 25.0 else "LowVol")
-            except:
-                current_regime = "Unknown"
+            current_regime = regime_at(market_df, current_date)
+
+            # 🌟 市場環境過濾：不在允許清單內的環境，當天訊號一律不進場
+            if regime_filter is not None and current_regime not in regime_filter:
+                regime_rejected += len(daily_signals)
+                continue
 
             for _, trade in daily_signals.iterrows():
                 trade_sec = trade.get('板塊', 'Unknown') 
@@ -262,7 +269,7 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
     portfolio_df['真實回撤(%)'] = ((portfolio_df['交易後總淨值'] - portfolio_df['交易後總淨值'].expanding().max()) / portfolio_df['交易後總淨值'].expanding().max()) * 100.0
     max_dd_pct = abs(portfolio_df['真實回撤(%)'].min()) if not portfolio_df['真實回撤(%)'].empty else 0.0
     
-    bm_df = market_df.copy()
+    bm_df = market_df.copy() if market_df is not None else None
     if bm_df is not None and not bm_df.empty:
         start_date = portfolio_df['日期'].min()
         end_date = portfolio_df['出場日期'].max()
@@ -305,7 +312,9 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
     
     stats = {
         "總交易次數": total_trades,
-        "風控與資金不足淘汰次數": len(raw_portfolio_df) - total_trades if 'raw_portfolio_df' in locals() else 0,
+        "市場環境過濾淘汰次數": regime_rejected,
+        "風控與資金不足淘汰次數": len(raw_portfolio_df) - total_trades - regime_rejected,
+        "允許進場環境": "、".join(sorted(regime_filter)) if regime_filter else "不過濾",
         "勝率(%)": round(win_rate * 100, 2),
         "Portfolio期望值(R)": round((win_rate * avg_w) - ((1 - win_rate) * avg_l), 2),
         "平均R倍數": round(avg_r, 2),

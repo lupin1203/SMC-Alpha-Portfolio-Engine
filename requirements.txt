@@ -1,4 +1,8 @@
 streamlit
 yfinance
 pandas
+numpy
 plotly
+requests
+urllib3
+pyarrow

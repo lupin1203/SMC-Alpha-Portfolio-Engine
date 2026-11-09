@@ -29,13 +29,18 @@ def download_all_stocks(years=10):
     logging.info(f"啟動全市場資料落地計畫，共計 {total} 檔標的，預計耗時約 30-60 分鐘...")
 
     for i, ticker in enumerate(all_tickers):
-        file_path = os.path.join(DATA_DIR, f"{ticker}.parquet")
+        # stock_list.csv 的代號已含 .TW 後綴 (例如 2330.TW)，這裡拆出純代號，
+        # 檔名必須與 data_provider.fetch_stock_data 讀取的 ./local_data/2330.parquet 一致
+        stock_id = str(ticker).split(".")[0]
+        file_path = os.path.join(DATA_DIR, f"{stock_id}.parquet")
         
         logging.info(f"[{i+1}/{total}] 正在同步 {ticker} ...")
         try:
-            # 這裡以 yfinance 為例，加上 .TW 後綴
-            # 如果你原本是用 FinMind，可以替換成 FinMind 的 API
-            df = yf.download(f"{ticker}.TW", period=f"{years}y", progress=False)
+            # 與 fetch_stock_data 相同的抓法：還原權息 (auto_adjust)、單層欄位、去除時區
+            df = yf.Ticker(f"{stock_id}.TW").history(period=f"{years}y", auto_adjust=True)
+            if df is not None and not df.empty:
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+                df.index = df.index.tz_localize(None)
             
             if df is not None and not df.empty and len(df) > 10:
                 # 存成 Parquet 格式
