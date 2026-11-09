@@ -25,6 +25,7 @@ class TrendParams:
     # "none" / "short_bear": 多單照做, 空單只在空頭時 / "regime": 多頭只做多, 空頭只做空
     regime: str = "none"
     regime_sma: int = 200
+    fixed_stop_pct: float = 0.0  # >0: 固定百分比停損 (例如 2.0 = 進場價 2%), 取代 ATR 停損
     fee: float = 0.0005
     slippage: float = 0.0002
     funding_8h: float = 0.0001
@@ -72,7 +73,8 @@ def backtest_trend(df: pd.DataFrame, p: TrendParams) -> list[Trade]:
             close(pos, i, o[i]); pos, pending_exit = None, False
         if pos is None and pending != 0 and not np.isnan(a[i - 1]):
             d = pending
-            sl = o[i] - d * p.atr_mult * a[i - 1]
+            sl = (o[i] * (1 - d * p.fixed_stop_pct / 100) if p.fixed_stop_pct > 0
+                  else o[i] - d * p.atr_mult * a[i - 1])
             pos = Trade(d, i, o[i], sl, np.nan)
             pos.sl0 = sl
         pending = 0
