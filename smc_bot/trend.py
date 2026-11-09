@@ -21,6 +21,10 @@ class TrendParams:
     atr_mult: float = 2.0
     both: bool = False  # False = 只做多
     short_only: bool = False
+    # 大週期濾網 (日線收盤 vs 日線 SMA, 只用已收盤的日K):
+    # "none" / "short_bear": 多單照做, 空單只在空頭時 / "regime": 多頭只做多, 空頭只做空
+    regime: str = "none"
+    regime_sma: int = 200
     fee: float = 0.0005
     slippage: float = 0.0002
     funding_8h: float = 0.0001
@@ -32,8 +36,17 @@ def atr(df, n=20):
     return tr.rolling(n).mean().to_numpy()
 
 
+def daily_bear(df: pd.DataFrame, sma: int) -> np.ndarray:
+    """每根K棒對應「上一根已收盤日K」是否在日線 SMA 之下 (True = 空頭)。資料不足時視為多頭。"""
+    d = df["close"].resample("1D").last().dropna()
+    bear = (d < d.rolling(sma).mean()).shift(1).fillna(False).to_numpy()
+    pos = d.index.searchsorted(df.index, side="right") - 1
+    return np.where(pos >= 0, bear[np.clip(pos, 0, None)], False)
+
+
 def backtest_trend(df: pd.DataFrame, p: TrendParams) -> list[Trade]:
     o, h, l, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
+    bear = daily_bear(df, p.regime_sma) if p.regime != "none" else np.zeros(len(c), dtype=bool)
     a = atr(df)
     hh = df["high"].rolling(p.entry_n).max().shift(1).to_numpy()
     ll = df["low"].rolling(p.entry_n).min().shift(1).to_numpy()
@@ -71,9 +84,11 @@ def backtest_trend(df: pd.DataFrame, p: TrendParams) -> list[Trade]:
         if np.isnan(hh[i]) or np.isnan(xl[i]):
             continue
         if pos is None:
-            if c[i] > hh[i] and not p.short_only:
+            long_ok = not p.short_only and not (p.regime == "regime" and bear[i])
+            short_ok = (p.both or p.short_only or p.regime != "none") and (p.regime == "none" or bear[i])
+            if c[i] > hh[i] and long_ok:
                 pending = 1
-            elif (p.both or p.short_only) and c[i] < ll[i]:
+            elif short_ok and c[i] < ll[i]:
                 pending = -1
         elif (pos.dir == 1 and c[i] < xl[i]) or (pos.dir == -1 and c[i] > xh[i]):
             pending_exit = True
