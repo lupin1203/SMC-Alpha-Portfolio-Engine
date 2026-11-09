@@ -112,9 +112,9 @@ def htf_trend(df_htf: pd.DataFrame, swing: int) -> pd.Series:
 def map_htf(df: pd.DataFrame, htf_rule: str, swing: int) -> np.ndarray:
     """對每根低週期K棒, 取「上一根已收盤高週期K棒」的方向 (= Pine 的 expr[1] + lookahead_on)。"""
     df_htf = resample(df, htf_rule)
-    tr = htf_trend(df_htf, swing).shift(1).fillna(0).astype(int)
-    bucket = df.index.floor(htf_rule) if htf_rule.endswith(("h", "H", "min")) else df.index.floor(htf_rule)
-    return tr.reindex(bucket).fillna(0).astype(int).to_numpy()
+    tr = htf_trend(df_htf, swing).shift(1).fillna(0).astype(int).to_numpy()
+    pos = df_htf.index.searchsorted(df.index, side="right") - 1  # 每根K棒所屬的高週期K棒
+    return np.where(pos >= 0, tr[np.clip(pos, 0, None)], 0)
 
 
 def backtest(df: pd.DataFrame, htf_dir: np.ndarray, p: Params, blackout: np.ndarray | None = None) -> list[Trade]:
