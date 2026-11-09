@@ -25,6 +25,7 @@ class TrendParams:
     # "none" / "short_bear": 多單照做, 空單只在空頭時 / "regime": 多頭只做多, 空頭只做空
     regime: str = "none"
     regime_sma: int = 200
+    stop_fill: str = "stop"  # "stop": 停損價成交 (跳空則開盤價); "worst": 壓力測試, 以該K棒最低(高)價成交
     fixed_stop_pct: float = 0.0  # >0: 固定百分比停損 (例如 2.0 = 進場價 2%), 取代 ATR 停損
     fee: float = 0.0005
     slippage: float = 0.0002
@@ -81,6 +82,8 @@ def backtest_trend(df: pd.DataFrame, p: TrendParams) -> list[Trade]:
         # 盤中停損
         if pos is not None and ((l[i] <= pos.sl) if pos.dir == 1 else (h[i] >= pos.sl)):
             px = min(o[i], pos.sl) if pos.dir == 1 else max(o[i], pos.sl)
+            if p.stop_fill == "worst":
+                px = l[i] if pos.dir == 1 else h[i]
             close(pos, i, px); pos = None
         # 收盤: 產生訊號
         if np.isnan(hh[i]) or np.isnan(xl[i]):
