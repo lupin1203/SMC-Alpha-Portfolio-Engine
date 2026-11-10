@@ -8,6 +8,7 @@ DB_NAME = "smc_system.db"
 
 def init_db():
     """初始化資料庫與資料表"""
+    conn = None
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
@@ -19,10 +20,12 @@ def init_db():
     except Exception as e:
         logging.error(f"資料庫初始化失敗: {str(e)}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 def save_backtest_record(ticker, gap, tp_val, exp, win_rate, max_dd, total_r):
     """儲存單筆回測紀錄"""
+    conn = None
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
@@ -37,7 +40,8 @@ def save_backtest_record(ticker, gap, tp_val, exp, win_rate, max_dd, total_r):
         logging.error(f"儲存紀錄失敗: {str(e)}")
         return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 def save_backtest_records_batch(records_list):
     """
@@ -48,6 +52,7 @@ def save_backtest_records_batch(records_list):
     if not records_list:
         return False
         
+    conn = None
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
@@ -70,10 +75,12 @@ def save_backtest_records_batch(records_list):
         logging.error(f"批次儲存紀錄失敗: {str(e)}")
         return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 def load_history():
     """讀取歷史紀錄"""
+    conn = None
     try:
         conn = sqlite3.connect(DB_NAME)
         df = pd.read_sql_query("SELECT * FROM backtest_history ORDER BY id DESC", conn)
@@ -81,4 +88,5 @@ def load_history():
     except Exception:
         return pd.DataFrame()
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()

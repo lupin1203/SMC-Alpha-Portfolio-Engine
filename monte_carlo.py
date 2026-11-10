@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 import logging
 
-def run_monte_carlo(trades_df, num_simulations=1000, ruin_drawdown_pct=30.0, starting_capital=100.0):
+def run_monte_carlo(trades_df, num_simulations=1000, ruin_drawdown_pct=30.0, starting_capital=100.0, risk_per_trade_pct=2.0):
     """
     執行蒙地卡羅模擬 (Bootstrap 重抽樣)
     trades_df: 包含 '真實R' 欄位的交易紀錄 DataFrame
+    risk_per_trade_pct: 單筆風險 (%)，用來把 R 回撤換算成帳戶回撤 % 以判定破產
     """
     if trades_df.empty or '真實R' not in trades_df.columns:
         logging.warning("沒有足夠的交易紀錄來執行蒙地卡羅模擬。")
@@ -37,7 +38,6 @@ def run_monte_carlo(trades_df, num_simulations=1000, ruin_drawdown_pct=30.0, sta
         
         # 破產判定 (假設每 1R = 預設資金的某個百分比，這裡簡化為直接看 DD_R 是否超過容忍極限)
         # 假設你的 ruin_drawdown_pct 是 30%，單筆風險是 2%，那 15R 的回撤就是破產
-        risk_per_trade_pct = 2.0 
         if (max_dd * risk_per_trade_pct) >= ruin_drawdown_pct:
             ruin_count += 1
 

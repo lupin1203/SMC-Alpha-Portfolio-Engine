@@ -2,8 +2,6 @@ import pandas as pd
 import requests
 import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 # 🌟 新增：證交所產業代碼翻譯字典
 TWSE_INDUSTRY_MAP = {
     "01": "水泥工業", "02": "食品工業", "03": "塑膠工業", "04": "紡織纖維", "05": "電機機械",
@@ -19,7 +17,14 @@ def generate_stock_list():
     url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
     
     try:
-        response = requests.get(url, verify=False)
+        try:
+            response = requests.get(url, timeout=30)
+        except requests.exceptions.SSLError:
+            # 證交所憑證在部分 Python 版本會驗證失敗，只在這種情況下退回不驗證
+            print("⚠️ 證交所憑證驗證失敗，改用不驗證模式重試。")
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            response = requests.get(url, timeout=30, verify=False)
+        response.raise_for_status()
         data = response.json()
         
         stock_list = []
@@ -45,4 +50,5 @@ def generate_stock_list():
     except Exception as e:
         print(f"❌ 抓取失敗: {e}")
 
-generate_stock_list()
+if __name__ == "__main__":
+    generate_stock_list()

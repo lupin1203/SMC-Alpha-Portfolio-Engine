@@ -51,6 +51,9 @@ def fetch_stock_data(ticker_str, days):
             # 確保索引是 datetime，且欄位名稱首字母大寫
             if not isinstance(df.index, pd.DatetimeIndex):
                 df.index = pd.to_datetime(df.index)
+            # 舊版快取可能帶時區 (Asia/Taipei)，統一轉成不帶時區，避免與一般日期比較時報錯
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
             df.columns = [c.capitalize() if c.lower() != 'fvg' else 'FVG' for c in df.columns]
             return df
         except Exception as e:
@@ -67,9 +70,10 @@ def fetch_stock_data(ticker_str, days):
         stock = yf.Ticker(f"{stock_id}.TW")
         df_result = stock.history(period="max", auto_adjust=True)
         if not df_result.empty:
+            # 先去掉時區再比較日期 (帶時區的索引不能和一般日期直接比較)
+            df_result.index = df_result.index.tz_localize(None)
             df_result = df_result[df_result.index >= pd.to_datetime(start_date)]
             df_result = df_result[['Open', 'High', 'Low', 'Close', 'Volume']]
-            df_result.index = df_result.index.tz_localize(None)
     except Exception as e:
         logging.error(f"YFinance 下載失敗 ({stock_id}): {e}")
             

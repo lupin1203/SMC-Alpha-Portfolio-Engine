@@ -7,6 +7,7 @@ import concurrent.futures
 import logging
 import requests
 import datetime
+import os
 st.set_page_config(page_title="SMC 量化拷問終端 V19.0", layout="wide")
 # --- 新增工具函數 ---
 def safe_divide(a, b):
@@ -18,6 +19,9 @@ def safe_divide(a, b):
 def send_telegram_async(msg):
     """非同步發送 Telegram 訊息 (啟用額外執行緒)"""
     import threading
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 環境變數，略過 Telegram 通知。")
+        return
     def _send():
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
@@ -26,7 +30,7 @@ def send_telegram_async(msg):
             'parse_mode': 'Markdown'
         }
         try:
-            requests.post(url, json=payload)
+            requests.post(url, json=payload, timeout=10)
         except Exception as e:
             logger.warning(f"Telegram 發送失敗: {e}")
     thread = threading.Thread(target=_send, daemon=True)
@@ -42,18 +46,21 @@ from backtest_engine import run_backtest_core
 from database import init_db, save_backtest_record, load_history, save_backtest_records_batch
 from monte_carlo import run_monte_carlo
 from portfolio_engine import run_portfolio_backtest
+from regime import ALL_REGIMES, DEFAULT_ALLOWED_REGIMES, add_regime_columns
+from config import HOLDOUT_START
 
 # 對齊 kwargs，讓選配參數安全送達底層
 @st.cache_data(ttl=3600)
 def get_cached_portfolio_results(*args, **kwargs):
-    # 1. 支援 Tab 3 的舊版寫法 (傳入整整 18 個位置參數)
-    if len(args) == 18:
+    # 1. 支援 Tab 3 的舊版寫法 (18 個位置參數，第 19 個可選為允許進場環境)
+    if len(args) in (18, 19):
         return run_portfolio_backtest(
             tickers=args[0], years=args[1], bt_mode=args[2], bt_val=args[3], gap_pct=args[4], use_sma=args[5],
             use_vol_filter=args[6], use_atr_filter=args[7], use_bos_filter=args[8],
             slippage_pct=args[9], fee_disc=args[10], min_vol=args[11], 
             max_concurrent=args[12], max_per_sector=args[13], sector_map=args[14], 
-            risk_pct=args[15], initial_capital=args[16], account_dd_limit=args[17]
+            risk_pct=args[15], initial_capital=args[16], account_dd_limit=args[17],
+            allowed_regimes=args[18] if len(args) == 19 else DEFAULT_ALLOWED_REGIMES
         )
     # 2. 支援 Heatmap 或自訂腳本的新寫法 (使用 bt_mode=... 等關鍵字參數)
     else:
@@ -70,8 +77,9 @@ st.title("SMC 台股科學選股引擎 V19.0 (多核運算版)")
 st.caption("Tier 5 機構級驗證：動態部位縮減、移動停利解鎖、蒙地卡羅壓力測試")
 
 # --- Telegram 配置 ---
-TELEGRAM_BOT_TOKEN ='8902281081:AAGSkks37g_wcpcf5KEulXsthf_jkin9hy0'
-TELEGRAM_CHAT_ID ='7779789363'
+# 金鑰一律從環境變數讀取，不寫在程式碼裡 (設定方式見 README)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # 分頁宣告
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["即時掃描雷達", "深度回測實驗室", "投資組合回測 (Portfolio)", "歷史戰績資料庫", "防禦與衰減檢定"])
@@ -95,6 +103,8 @@ with tab1:
         min_rr = st.number_input("最低預期賠率 (R)", value=2.0, step=0.5)
     with col_risk3:
         max_capital_per_trade = st.number_input("單筆資金佔比上限 (%)", value=20.0, step=5.0) / 100.0
+        r_regimes = st.multiselect("允許進場環境", ALL_REGIMES, default=list(DEFAULT_ALLOWED_REGIMES), key="r_regimes",
+                                   help="與投資組合回測使用同一套規則：0050 vs 200 日均線 + 20 日年化波動率 25%")
 
     st.markdown("### 掃描條件與 SMC 濾網設定")
     c1, c2, c3, c4 = st.columns([1,1,1,2])
@@ -115,15 +125,17 @@ with tab1:
             target_tickers.extend(INDUSTRY_DICT.get(sec, []))
             
         with st.spinner("正在檢查大盤宏觀環境..."):
-            m_data = fetch_stock_data("0050.TW", days=100)
+            m_data = fetch_stock_data("0050.TW", days=450)
             if m_data is not None and not m_data.empty:
+                m_data = add_regime_columns(m_data)
                 m_close = m_data['Close'].iloc[-1]
-                m_sma_val = m_data['Close'].rolling(60).mean().iloc[-1]
                 m_change = (m_close / m_data['Close'].iloc[-2] - 1) * 100
+                live_regime = m_data['Regime'].iloc[-1]
 
-                if m_close < m_sma_val:
-                    st.error("大盤斷路器啟動：0050 位於季線下方，目前環境極度危險，系統拒絕發出任何買入建議。")
+                if live_regime not in r_regimes:
+                    st.error(f"大盤斷路器啟動：目前市場環境為 {live_regime}，不在允許進場清單 ({'、'.join(r_regimes) or '無'}) 內，系統拒絕發出任何買入建議。")
                     st.stop()
+                st.info(f"目前市場環境：{live_regime}（允許進場）")
                 if m_change < -2.0:
                     st.warning(f"市場恐慌警告：今日大盤跌幅達 {m_change:.2f}%，建議放棄所有新掛單。")
 
@@ -278,7 +290,7 @@ with tab2:
 
         st.divider()
         st.subheader("蒙地卡羅壓力測試 (1,000 次序列重抽)")
-        mc_results = run_monte_carlo(df_oos_res) 
+        mc_results = run_monte_carlo(df_oos_res, risk_per_trade_pct=risk_pct * 100)
         
         if mc_results:
             m1, m2, m3, m4 = st.columns(4)
@@ -304,6 +316,8 @@ with tab3:
         p_max_pos = st.slider("最大持倉數", 1, 20, 5)
         p_max_sec = st.slider("單一產業上限", 1, 5, 2)
         p_account_dd = st.slider("帳戶停機線 (%)", 10, 50, 20, 5) / 100.0
+        p_regimes = st.multiselect("允許進場環境", ALL_REGIMES, default=list(DEFAULT_ALLOWED_REGIMES), key="p_regimes",
+                                   help="清空代表不過濾市場環境")
         
         st.divider()
         p_mode = st.selectbox("出場方式", ["固定盈虧比", "移動停利"], key="pmode_sel")
@@ -315,6 +329,24 @@ with tab3:
         p_vol = st.checkbox("要求起漲爆量", value=False, key="pvol_chk")
         p_atr = st.checkbox("強勢實體位移", value=False, key="patr_chk")
         p_bos = st.checkbox("突破近期新高", value=False, key="pbos_chk")
+
+        with st.expander("研究設定 (真實度 / 考試期 / 對照組)", expanded=False):
+            p_period_label = st.radio(
+                "回測期間",
+                [f"研究期 (< {HOLDOUT_START})", f"考試期 (≥ {HOLDOUT_START})", "全期間"],
+                key="p_period",
+                help="考試期保留作最後驗證：參數全部定案後只看一次，看過後再改參數，考試期就失效了。")
+            p_period = {0: "in_sample", 1: "holdout", 2: "all"}[
+                [f"研究期 (< {HOLDOUT_START})", f"考試期 (≥ {HOLDOUT_START})", "全期間"].index(p_period_label)]
+            if p_period == "holdout":
+                st.warning("你正在看考試期。請確認參數已經全部定案。")
+            p_realistic = st.checkbox("實盤真實模式", value=False, key="p_realistic",
+                                      help="隔日觸價進場、漲停買不到、跌停賣不掉、10 天保護期 + 2R 緊急停損、同檔不重複、K 棒內順序修正、期末結算未平倉部位")
+            p_protect = st.number_input("保護期天數 (0 = 關閉)", 0, 30, 10, key="p_protect", disabled=not p_realistic)
+            p_max_pos_pct = st.slider("單筆資金上限 (% 淨值，100 = 不限)", 5, 100, 20 if p_realistic else 100, 5, key="p_max_pos_pct")
+            p_random = st.checkbox("隨機進場對照組", value=False, key="p_random",
+                                   help="訊號數量不變、日期隨機，出場規則不變。用來檢驗 FVG 進場是否真的有優勢。")
+            p_seed = st.number_input("隨機種子", 0, 9999, 0, key="p_seed", disabled=not p_random)
         
         run_portfolio = st.button(" 執行組合驗證", type="primary", use_container_width=True)
 
@@ -331,9 +363,18 @@ with tab3:
                 
                 with st.spinner(f"正在平行運算 {len(tickers_to_test)} 檔標的，請稍候..."):
                     p_df, p_stats, bm_df = get_cached_portfolio_results(
-                        tickers_to_test, p_years, p_mode, p_val, p_gap, p_sma,
-                        p_vol, p_atr, p_bos, 0.002, 0.28, 1000, 
-                        p_max_pos, p_max_sec, sector_map, p_risk, p_cap, p_account_dd
+                        tickers=tickers_to_test, years=p_years, bt_mode=p_mode, bt_val=p_val,
+                        gap_pct=p_gap, use_sma=p_sma,
+                        use_vol_filter=p_vol, use_atr_filter=p_atr, use_bos_filter=p_bos,
+                        slippage_pct=0.002, fee_disc=0.28, min_vol=1000,
+                        max_concurrent=p_max_pos, max_per_sector=p_max_sec, sector_map=sector_map,
+                        risk_pct=p_risk, initial_capital=p_cap, account_dd_limit=p_account_dd,
+                        allowed_regimes=tuple(p_regimes) if p_regimes else None,
+                        period=p_period,
+                        realistic=p_realistic,
+                        protection_days=int(p_protect) if p_realistic else None,
+                        max_position_pct=None if p_max_pos_pct >= 100 else p_max_pos_pct / 100.0,
+                        random_entry=p_random, random_seed=int(p_seed),
                     )
                     
                     if p_stats and not p_df.empty:

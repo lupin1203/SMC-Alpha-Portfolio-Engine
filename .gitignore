@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 執行期產生的資料 (本機自行下載 / 產生，不進版控)
+local_data/
+revenue_cache/
+smc_system.log
+*.log
+smc_system.db
+
+# 金鑰
+.env
