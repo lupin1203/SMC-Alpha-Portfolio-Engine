@@ -88,10 +88,17 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
     allowed_regimes: 允許進場的市場環境清單；傳入 None 代表不過濾。
     period: "all" 全期間 / "in_sample" 研究期 (HOLDOUT_START 之前) / "holdout" 考試期 (只計 HOLDOUT_START 之後的訊號)
     max_position_pct: 單筆投入資金上限 (佔已實現淨值比例，例如 0.2)；None = 不限制
+    rank_by: 同一天訊號超過可用名額時的挑選順序
+             "volume_surge" (預設，爆量倍數高的優先) / "volume_surge_asc" (爆量倍數低的優先) /
+             "random" (隨機，搭配 rank_seed)
     其他 kwargs：realistic、REALISM_DEFAULTS 中的個別選項、random_entry、random_seed 會傳給個股回測。
     """
     period = kwargs.pop('period', 'all')
     max_position_pct = kwargs.pop('max_position_pct', None)
+    rank_by = kwargs.pop('rank_by', 'volume_surge')
+    rank_seed = kwargs.pop('rank_seed', 0)
+    if rank_by not in ('volume_surge', 'volume_surge_asc', 'random'):
+        raise ValueError(f"未知的 rank_by: {rank_by}")
     one_per_ticker = kwargs.get('one_position_per_ticker', kwargs.get('realistic', False))
     holdout_ts = pd.Timestamp(HOLDOUT_START)
     if period not in ('all', 'in_sample', 'holdout'):
@@ -170,6 +177,15 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
             print("❌ 錯誤：考試期內沒有任何訊號。")
             return pd.DataFrame(), None, pd.DataFrame()
     raw_portfolio_df['真實進場日'] = pd.to_datetime(raw_portfolio_df['日期'])
+    # 排序鍵：同一天訊號的挑選順序 (數值越大越優先)
+    if rank_by == 'random':
+        # 先依固定欄位排序再抽亂數，確保同一個 rank_seed 結果可重現 (不受多進程完成順序影響)
+        raw_portfolio_df = raw_portfolio_df.sort_values(['真實進場日', '標的']).reset_index(drop=True)
+        raw_portfolio_df['_rank_key'] = np.random.default_rng(rank_seed).random(len(raw_portfolio_df))
+    elif rank_by == 'volume_surge_asc':
+        raw_portfolio_df['_rank_key'] = -raw_portfolio_df['Alpha動能分數']
+    else:
+        raw_portfolio_df['_rank_key'] = raw_portfolio_df['Alpha動能分數']
     
     actual_taken_trades = []
     active_positions = [] 
@@ -213,7 +229,7 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
 
         if current_date in signals_by_date and risk_multiplier > 0:
             daily_signals = signals_by_date[current_date].copy()
-            daily_signals = daily_signals.sort_values(by='Alpha動能分數', ascending=False)
+            daily_signals = daily_signals.sort_values(by=['_rank_key', '標的'], ascending=[False, True])
             
             current_regime = regime_at(market_df, current_date)
 
@@ -363,6 +379,8 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         "允許進場環境": "、".join(sorted(regime_filter)) if regime_filter else "不過濾",
         "回測期間": {"all": "全期間", "in_sample": f"研究期 (< {HOLDOUT_START})", "holdout": f"考試期 (≥ {HOLDOUT_START})"}[period],
         "實盤真實模式": "開" if kwargs.get('realistic', False) else "關",
+        "排序方式": {"volume_surge": "爆量倍數高優先", "volume_surge_asc": "爆量倍數低優先",
+                  "random": f"隨機 (seed={rank_seed})"}[rank_by],
         "隨機進場對照": f"開 (seed={kwargs.get('random_seed', 0)})" if kwargs.get('random_entry', False) else "關",
         "勝率(%)": round(win_rate * 100, 2),
         "Portfolio期望值(R)": round((win_rate * avg_w) - ((1 - win_rate) * avg_l), 2),
