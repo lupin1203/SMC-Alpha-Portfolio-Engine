@@ -36,7 +36,12 @@ def _pure_calc_worker(ticker, df_raw, **kwargs):
 
         # 🎲 隨機進場對照組：訊號數量不變、日期隨機
         if kwargs.get('random_entry', False):
-            df_logic = randomize_signals(df_logic, seed=kwargs.get('random_seed', 0), salt=ticker)
+            mask = None
+            if kwargs.get('random_within_sma', False) and 'SMA60' in df_logic.columns:
+                # 只在收盤站上季線的日子隨機進場 (與 FVG 的季線濾網條件相同)
+                mask = df_logic['Close'] > df_logic['SMA60']
+            df_logic = randomize_signals(df_logic, seed=kwargs.get('random_seed', 0), salt=ticker,
+                                         candidate_mask=mask)
         
         # 執行回測 (真實度選項：realistic 預設 + 個別覆寫)
         realism_overrides = {k: kwargs[k] for k in REALISM_DEFAULTS if k in kwargs}

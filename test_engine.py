@@ -252,3 +252,26 @@ class TestDataProvider(unittest.TestCase):
                 os.chdir(cwd)
         self.assertIsNone(out.index.tz)
         self.assertEqual(len(out[out.index < pd.Timestamp("2024-01-03")]), 2)
+
+
+class TestEntryVariants(unittest.TestCase):
+    def test_breakout20(self):
+        n = 100
+        close = [100.0] * 90 + [101, 102, 103, 99, 98, 110, 100, 100, 100, 100]
+        df = pd.DataFrame({'Open': close, 'High': [c + 0.5 for c in close],
+                           'Low': [c - 0.5 for c in close], 'Close': close})
+        out = SMCStrategy().generate_signals(df.copy(), entry_type='breakout20', use_sma_filter=False)
+        # 收盤 > 前 20 日最高價 才算突破：101/102/103/110 是突破，99、98 不是
+        self.assertEqual(list(out.index[out['FVG']]), [90, 91, 92, 95])
+        self.assertTrue((out['adjusted_risk'] == out['Close'] * 0.03).all())
+
+    def test_random_respects_mask(self):
+        df = _make_market(n=300)
+        df['FVG'] = False
+        df.iloc[[100, 150, 200, 250], df.columns.get_loc('FVG')] = True
+        mask = pd.Series(False, index=df.index)
+        mask.iloc[200:220] = True
+        out = randomize_signals(df, seed=3, salt="X", candidate_mask=mask)
+        picked = np.flatnonzero(out['FVG'].values)
+        self.assertEqual(len(picked), 4)
+        self.assertTrue(((picked >= 200) & (picked < 220)).all())

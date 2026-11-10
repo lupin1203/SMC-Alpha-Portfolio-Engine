@@ -5,9 +5,15 @@
 只使用研究期資料 (config.HOLDOUT_START 之前)，考試期完全不碰。
 
 用法：
-    python research_compare.py                       # 全部板塊
+    python research_compare.py                       # 全部板塊，baseline 實驗組
+    python research_compare.py --suite entry         # 進場方式拆解實驗
     python research_compare.py --sectors 半導體業 電子零組件
     python research_compare.py --seeds 20            # 隨機對照組跑 20 組種子
+
+實驗組 (--suite)：
+  baseline：原始回測 / 實盤真實模式 / 隨機進場 —— FVG 進場有沒有比隨機好？
+  entry   ：全部用實盤真實模式，比較 FVG / 突破 20 日新高 / 只在季線上隨機進場 / 任意日隨機進場
+            —— 拆解是哪個進場條件在加分或扣分。
 
 輸出兩層結果：
   1. 訊號層：每一個訊號都當作獨立交易的平均 R —— 不受資金、持倉上限影響，
@@ -35,9 +41,21 @@ BASE_PARAMS = dict(
     initial_capital=1000000.0, account_dd_limit=0.20,
 )
 
-CONFIGS = {
-    "原始回測": dict(realistic=False),
-    "實盤真實模式": dict(realistic=True, max_position_pct=0.20),
+REALISTIC = dict(realistic=True, max_position_pct=0.20)
+
+# 每個實驗：(名稱, 設定, 是否為隨機對照組)
+SUITES = {
+    "baseline": [
+        ("原始回測", dict(realistic=False), False),
+        ("實盤真實模式", REALISTIC, False),
+        ("隨機進場 (實盤模式)", dict(REALISTIC, random_entry=True), True),
+    ],
+    "entry": [
+        ("FVG + 季線", REALISTIC, False),
+        ("突破20日新高 + 季線", dict(REALISTIC, entry_type="breakout20"), False),
+        ("隨機進場 (只在季線上)", dict(REALISTIC, random_entry=True, random_within_sma=True), True),
+        ("隨機進場 (任意日)", dict(REALISTIC, random_entry=True), True),
+    ],
 }
 
 
@@ -79,6 +97,7 @@ def main():
     ap.add_argument("--years", type=int, default=12, help="抓取的資料年數")
     ap.add_argument("--seeds", type=int, default=10, help="隨機對照組的種子數")
     ap.add_argument("--out", default="research_results", help="結果輸出資料夾")
+    ap.add_argument("--suite", default="baseline", choices=list(SUITES), help="實驗組")
     args = ap.parse_args()
 
     industry, _, _ = load_data()
@@ -108,49 +127,57 @@ def main():
     usable = list(data.keys())
 
     sig_rows, port_rows = [], []
-    for name, cfg in CONFIGS.items():
-        print(f"\n▶ {name}")
-        sig_rows.append({"設定": name, **signal_level_stats(data, sector_map, **cfg)})
-        port_rows.append({"設定": name, **portfolio_stats(usable, sector_map, args.years, **cfg)})
+    random_groups = {}   # 名稱 -> 各種子的訊號層平均 R
+    deterministic = {}   # 名稱 -> 訊號層平均 R
+    for name, cfg, is_random in SUITES[args.suite]:
+        if not is_random:
+            print(f"\n▶ {name}")
+            sig = signal_level_stats(data, sector_map, **cfg)
+            deterministic[name] = sig["平均R"]
+            sig_rows.append({"設定": name, **sig})
+            port_rows.append({"設定": name, **portfolio_stats(usable, sector_map, args.years, **cfg)})
+            continue
 
-    # 隨機對照組 (套用實盤真實模式，與上一列直接比較)
-    rand_sig, rand_port = [], []
-    for seed in range(args.seeds):
-        print(f"\n▶ 隨機進場 seed={seed}")
-        cfg = dict(CONFIGS["實盤真實模式"], random_entry=True, random_seed=seed)
-        rand_sig.append(signal_level_stats(data, sector_map, **cfg))
-        rand_port.append(portfolio_stats(usable, sector_map, args.years, **cfg))
-
-    rs = pd.DataFrame(rand_sig)
-    real_avg_r = sig_rows[-1]["平均R"]
-    pct_beaten = (rs["平均R"] < real_avg_r).mean() * 100 if len(rs) else np.nan
-    sig_rows.append({"設定": f"隨機進場 (實盤模式, {args.seeds} 組平均)",
-                     **{c: round(rs[c].mean(), 3) for c in rs.columns}})
-    sig_rows.append({"設定": "隨機進場 標準差", **{c: round(rs[c].std(), 3) for c in rs.columns}})
-
-    rp = pd.DataFrame(rand_port).apply(pd.to_numeric, errors="coerce")
-    if not rp.empty:
-        port_rows.append({"設定": f"隨機進場 (實盤模式, {args.seeds} 組平均)",
-                          **{c: round(rp[c].mean(), 2) for c in rp.columns}})
+        rand_sig, rand_port = [], []
+        for seed in range(args.seeds):
+            print(f"\n▶ {name} seed={seed}")
+            seed_cfg = dict(cfg, random_seed=seed)
+            rand_sig.append(signal_level_stats(data, sector_map, **seed_cfg))
+            rand_port.append(portfolio_stats(usable, sector_map, args.years, **seed_cfg))
+        rs = pd.DataFrame(rand_sig)
+        random_groups[name] = rs["平均R"]
+        sig_rows.append({"設定": f"{name}，{args.seeds} 組平均", **{c: round(rs[c].mean(), 3) for c in rs.columns}})
+        sig_rows.append({"設定": f"{name}，標準差", **{c: round(rs[c].std(), 3) for c in rs.columns}})
+        rp = pd.DataFrame(rand_port).apply(pd.to_numeric, errors="coerce")
+        if not rp.empty:
+            port_rows.append({"設定": f"{name}，{args.seeds} 組平均", **{c: round(rp[c].mean(), 2) for c in rp.columns}})
+            port_rows.append({"設定": f"{name}，最差 / 最好報酬(%)",
+                              "真實總報酬(%)": f"{rp['真實總報酬(%)'].min():.1f} / {rp['真實總報酬(%)'].max():.1f}"})
 
     sig_df = pd.DataFrame(sig_rows)
     port_df = pd.DataFrame(port_rows)
 
-    verdict = (f"FVG 訊號的平均 R ({real_avg_r}) 贏過 {pct_beaten:.0f}% 的隨機對照組。"
-               if not np.isnan(pct_beaten) else "")
+    verdicts = []
+    for d_name, d_r in deterministic.items():
+        for r_name, r_series in random_groups.items():
+            beaten = (r_series < d_r).mean() * 100
+            verdicts.append(f"{d_name} 的平均 R ({d_r}) 贏過 {beaten:.0f}% 的「{r_name}」對照組"
+                            f"（對照組平均 {r_series.mean():.3f}）。")
+    verdict = "\n".join(verdicts)
 
     os.makedirs(args.out, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-    path = os.path.join(args.out, f"compare_{stamp}.md")
+    path = os.path.join(args.out, f"compare_{args.suite}_{stamp}.md")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# 對照實驗結果 ({stamp})\n\n")
+        f.write(f"# 對照實驗結果：{args.suite} ({stamp})\n\n")
         f.write(f"- 研究期：< {HOLDOUT_START}（考試期未使用）\n")
         f.write(f"- 板塊：{'、'.join(sectors)}；有效標的 {len(data)} 檔\n")
         f.write(f"- 參數：{BASE_PARAMS}\n\n")
         f.write("## 訊號層（每個訊號獨立計算，不受資金限制）\n\n")
         f.write(sig_df.to_markdown(index=False) + "\n\n")
-        if verdict:
-            f.write(f"**{verdict}**\n\n")
+        for v in verdicts:
+            f.write(f"- **{v}**\n")
+        f.write("\n")
         f.write("## 組合層（資金、持倉、產業上限、市場環境過濾後）\n\n")
         f.write(port_df.to_markdown(index=False) + "\n")
 
