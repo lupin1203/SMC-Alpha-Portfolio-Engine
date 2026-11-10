@@ -23,6 +23,8 @@ class SMCStrategy(BaseStrategy):
             return df
             
         df['SMA60'] = df['Close'].rolling(60).mean()
+        # 缺口上緣 (= 當天最低價)：回檔掛單進場模式用來當限價
+        df['fvg_top'] = df['Low']
 
         if entry_type == 'breakout20':
             # 對照組：單純突破策略。停損距離用與 FVG 相同的下限 (收盤價 3%)，出場規則不變
