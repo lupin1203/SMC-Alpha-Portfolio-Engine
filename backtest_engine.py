@@ -16,7 +16,11 @@ REALISM_DEFAULTS = {
     #   "close"     = 訊號當天收盤價進場 (原始邏輯，實盤其實做不到)
     #   "next_stop" = 隔天掛觸價單 (觸價 = 訊號日收盤)，盤中最高價 ≥ 觸價才成交，
     #                 成交價 = max(開盤, 觸價)；沒觸發就取消
+    #   "retest"    = 回檔掛單：隔天起在缺口上緣 (訊號日最低價) 掛限價買單，retest_days 天內有效。
+    #                 盤中最低價 ≤ 限價才成交，成交價 = min(開盤, 限價)；
+    #                 開盤已跌破停損價則取消 (不會明知會停損還買)，過期也取消
     "entry_mode": "close",
+    "retest_days": 5,
     # 漲停買不到：close 模式下訊號日收盤漲停則跳過；next_stop 模式下成交日一字漲停則跳過
     "skip_limit_up": False,
     # 跌停賣不掉：一字跌停 (最高 = 最低 且跌幅達跌停) 當天無法出場，留到隔天再判斷
@@ -169,7 +173,25 @@ class InstitutionalBacktestEngine:
             # ==========================================
             # 📥 隔日觸價單成交判定 (next_stop 模式)
             # ==========================================
-            if pending_order is not None:
+            if pending_order is not None and pending_order['type'] == 'limit':
+                order = pending_order
+                limit = order['limit']
+                stop_price = limit - order['risk_dist']
+                if current_open <= stop_price:
+                    pending_order = None  # 開盤已跌破停損，取消掛單
+                elif current_low <= limit:
+                    pending_order = None
+                    fill_price = min(current_open, limit)
+                    pos, entry_cost = self._open_position(
+                        index, order['signal_time'], fill_price, stop_price,
+                        order['risk_dist'], order['planned_risk_amount'], order['shares'])
+                    cash -= entry_cost
+                    active_positions.append(pos)
+                else:
+                    order['days_left'] -= 1
+                    if order['days_left'] <= 0:
+                        pending_order = None  # 過期
+            elif pending_order is not None:
                 order, pending_order = pending_order, None
                 trigger = order['trigger']
                 if o['skip_limit_up'] and locked_limit_up:
@@ -250,13 +272,25 @@ class InstitutionalBacktestEngine:
             risk_dist = adj_risk
             if risk_dist <= 1e-5:
                 continue
-            if o['one_position_per_ticker'] and active_positions:
+            if o['one_position_per_ticker'] and (active_positions or pending_order is not None):
                 continue
 
             shares, planned_risk_amount = self._size(current_mtm_equity, risk_dist)
 
-            if o['entry_mode'] == "next_stop":
+            if o['entry_mode'] == "retest":
+                # 新訊號取代舊的未成交掛單
                 pending_order = {
+                    'type': 'limit',
+                    'signal_time': index,
+                    'limit': getattr(row, 'fvg_top', current_close),
+                    'risk_dist': risk_dist,
+                    'shares': shares,
+                    'planned_risk_amount': planned_risk_amount,
+                    'days_left': int(o['retest_days']),
+                }
+            elif o['entry_mode'] == "next_stop":
+                pending_order = {
+                    'type': 'stop',
                     'signal_time': index,
                     'trigger': current_close,
                     'risk_dist': risk_dist,

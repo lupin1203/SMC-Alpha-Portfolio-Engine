@@ -275,3 +275,31 @@ class TestEntryVariants(unittest.TestCase):
         picked = np.flatnonzero(out['FVG'].values)
         self.assertEqual(len(picked), 4)
         self.assertTrue(((picked >= 200) & (picked < 220)).all())
+
+
+class TestRetestEntry(unittest.TestCase):
+    def _df(self, rows, top=97.0):
+        df = _bars(rows, signal_at=[0])
+        df['fvg_top'] = top
+        return df
+
+    def test_fills_on_pullback_at_limit(self):
+        # 訊號日缺口上緣 97、風險 3 → 停損 94
+        rows = [(100, 101, 97, 100), (100, 101, 98, 99), (98, 99, 96.5, 98), (98, 99, 93, 94)]
+        t = _run(self._df(rows), entry_mode="retest")
+        self.assertEqual(t['entry_time'].iloc[0], self._df(rows).index[2])
+        self.assertEqual(t['entry_price'].iloc[0], 97)
+        self.assertEqual(t['exit_price'].iloc[0], 94)
+        self.assertAlmostEqual(t['real_r'].iloc[0], -1.0, places=2)
+
+    def test_gap_down_fill_at_open(self):
+        rows = [(100, 101, 97, 100), (96, 97, 95.5, 96), (96, 97, 93, 94)]
+        t = _run(self._df(rows), entry_mode="retest")
+        self.assertEqual(t['entry_price'].iloc[0], 96)  # 開低於限價，以開盤成交
+
+    def test_cancel_when_open_below_stop_or_expired(self):
+        rows = [(100, 101, 97, 100), (93, 94, 90, 92), (92, 99, 91, 98)]
+        self.assertTrue(_run(self._df(rows), entry_mode="retest", close_open_at_end=True).empty)
+        rows2 = [(100, 101, 97, 100)] + [(101, 102, 99, 101)] * 3 + [(98, 99, 96, 97)]
+        self.assertTrue(_run(self._df(rows2), entry_mode="retest", retest_days=3, close_open_at_end=True).empty)
+        self.assertEqual(len(_run(self._df(rows2), entry_mode="retest", retest_days=5, close_open_at_end=True)), 1)

@@ -14,6 +14,8 @@
   baseline：原始回測 / 實盤真實模式 / 隨機進場 —— FVG 進場有沒有比隨機好？
   entry   ：全部用實盤真實模式，比較 FVG / 突破 20 日新高 / 只在季線上隨機進場 / 任意日隨機進場
             —— 拆解是哪個進場條件在加分或扣分。
+  pullback：FVG 有無季線濾網 × 追價進場 / 回檔到缺口上緣才進場，
+            對照組為任意日隨機進場 (追價 / 回檔到當日低點)。
 
 輸出兩層結果：
   1. 訊號層：每一個訊號都當作獨立交易的平均 R —— 不受資金、持倉上限影響，
@@ -55,6 +57,14 @@ SUITES = {
         ("突破20日新高 + 季線", dict(REALISTIC, entry_type="breakout20"), False),
         ("隨機進場 (只在季線上)", dict(REALISTIC, random_entry=True, random_within_sma=True), True),
         ("隨機進場 (任意日)", dict(REALISTIC, random_entry=True), True),
+    ],
+    "pullback": [
+        ("FVG + 季線，追價", REALISTIC, False),
+        ("FVG 無季線，追價", dict(REALISTIC, use_sma=False), False),
+        ("FVG + 季線，回檔進場", dict(REALISTIC, entry_mode="retest"), False),
+        ("FVG 無季線，回檔進場", dict(REALISTIC, use_sma=False, entry_mode="retest"), False),
+        ("隨機進場，追價", dict(REALISTIC, random_entry=True), True),
+        ("隨機進場，回檔進場", dict(REALISTIC, random_entry=True, entry_mode="retest"), True),
     ],
 }
 
