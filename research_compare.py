@@ -19,6 +19,8 @@
   portfolio：進場固定為「FVG 無季線、追價」，研究組合層：
             (1) 訊號層拆解：依市場環境、爆量倍數五分位看平均 R
             (2) 組合回測：排序方式、市場環境過濾、單筆風險，一次只改一項
+  volfilter：排除爆量訊號 (訊號日成交量 ÷ 20 日均量 > 1.9) 有沒有幫助，
+            有無季線濾網各測一次，對照組為訊號數相同的隨機進場。
 
 輸出兩層結果：
   1. 訊號層：每一個訊號都當作獨立交易的平均 R —— 不受資金、持倉上限影響，
@@ -27,9 +29,11 @@
 """
 import argparse
 import datetime
+import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
 import pandas as pd
@@ -125,6 +129,149 @@ def signal_breakdown(signals, market_df):
     return out
 
 
+# 爆量過濾實驗：門檻 1.9 來自研究期的五分位結果 (最高 20% 約 > 1.89 倍)，
+# 所以這個門檻本身是「看過研究期資料」挑的，研究期內的改善會偏樂觀，最後要靠考試期驗證。
+VOL_SURGE_CAP = 1.9
+# (名稱, 訊號層設定)：一次只改一項
+VOLFILTER_SIGNAL = [
+    ("A. FVG + 季線（原策略）", dict(REALISTIC)),
+    ("B. A + 排除爆量", dict(REALISTIC, max_vol_surge=VOL_SURGE_CAP)),
+    ("C. FVG 無季線", dict(REALISTIC, use_sma=False)),
+    ("D. C + 排除爆量", dict(REALISTIC, use_sma=False, max_vol_surge=VOL_SURGE_CAP)),
+]
+VOLFILTER_RANDOM = ("隨機進場（訊號數同 D）", dict(REALISTIC, use_sma=False, max_vol_surge=VOL_SURGE_CAP, random_entry=True))
+# (名稱, 在 D 之上再改的組合層設定, 種子參數或 None)
+VOLFILTER_PORTFOLIO = [
+    ("D + 排序：爆量倍數低優先", dict(rank_by="volume_surge_asc"), None),
+    ("D + 風險 0.5%", dict(risk_pct=0.5), None),
+    ("D + 排序：隨機", dict(rank_by="random"), "rank_seed"),
+]
+
+
+def _signal_summary(signals):
+    if signals is None or signals.empty:
+        return {"訊號數": 0, "平均R": np.nan, "標準誤": np.nan, "勝率(%)": np.nan, "R中位數": np.nan, "去掉前5大後平均R": np.nan}
+    r = signals['真實R'].astype(float)
+    return {
+        "訊號數": len(r),
+        "平均R": round(r.mean(), 3),
+        "標準誤": round(r.std() / np.sqrt(len(r)), 3),
+        "勝率(%)": round((r > 0).mean() * 100, 1),
+        "R中位數": round(r.median(), 3),
+        "去掉前5大後平均R": round(r.sort_values(ascending=False).iloc[5:].mean(), 3) if len(r) > 5 else np.nan,
+    }
+
+
+class Checkpoint:
+    """把每一步的結果存成 JSON。整個實驗要跑很久，中途當掉時重跑同一個指令會從上次的進度接著做。"""
+
+    def __init__(self, path, signature):
+        self.path = path
+        self.store = {}
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                saved = json.load(f)
+            if saved.get("signature") == signature:
+                self.store = saved.get("results", {})
+                print(f"從進度檔接續：已完成 {len(self.store)} 步 ({path})")
+        self.signature = signature
+
+    def get(self, key, compute):
+        if key not in self.store:
+            self.store[key] = compute()
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump({"signature": self.signature, "results": self.store}, f, ensure_ascii=False, default=str)
+        return self.store[key]
+
+
+def run_volfilter_suite(args, data, usable, sector_map, sectors):
+    last = max(df.index.max() for df in data.values()).date()
+    ckpt = Checkpoint(os.path.join(args.out, "_volfilter_progress.json"),
+                      f"{len(data)}|{last}|{args.seeds}|{VOL_SURGE_CAP}|{sorted(sectors)}|{BASE_PARAMS}")
+
+    def signal_step(cfg):
+        signals = collect_signals(data, sector_map, **cfg)
+        by_year = {}
+        if not signals.empty:
+            by_year = signals.groupby(pd.to_datetime(signals['訊號日']).dt.year)['真實R'].mean().round(2)
+            by_year = {str(k): float(v) for k, v in by_year.items()}
+        return {"summary": _signal_summary(signals), "by_year": by_year}
+
+    sig_rows, port_rows, yearly = [], [], {}
+    for name, cfg in VOLFILTER_SIGNAL:
+        print(f"\n▶ {name}")
+        s = ckpt.get(f"sig|{name}", lambda: signal_step(cfg))
+        sig_rows.append({"設定": name, **s["summary"]})
+        yearly[name] = pd.Series({int(k): v for k, v in s["by_year"].items()})
+        port_rows.append({"設定": name, **ckpt.get(
+            f"port|{name}", lambda: portfolio_stats(usable, sector_map, args.years, **cfg))})
+
+    name, cfg = VOLFILTER_RANDOM
+    rand_sig, rand_port = [], []
+    for seed in range(args.seeds):
+        print(f"\n▶ {name} seed={seed}")
+        seed_cfg = dict(cfg, random_seed=seed)
+        rand_sig.append(ckpt.get(f"rsig|{seed}", lambda: signal_step(seed_cfg))["summary"])
+        rand_port.append(ckpt.get(f"rport|{seed}", lambda: portfolio_stats(usable, sector_map, args.years, **seed_cfg)))
+    rs = pd.DataFrame(rand_sig)
+    sig_rows.append({"設定": f"{name}，{args.seeds} 組平均", **{c: round(rs[c].mean(), 3) for c in rs.columns}})
+    sig_rows.append({"設定": f"{name}，各組平均R的標準差", "平均R": round(rs["平均R"].std(), 3)})
+    rp = pd.DataFrame(rand_port).apply(pd.to_numeric, errors="coerce")
+    port_rows.append({"設定": f"{name}，{args.seeds} 組平均", **{c: round(rp[c].mean(), 2) for c in rp.columns}})
+    port_rows.append({"設定": f"{name}，最差 / 最好報酬(%)",
+                      "真實總報酬(%)": f"{rp['真實總報酬(%)'].min():.1f} / {rp['真實總報酬(%)'].max():.1f}"})
+
+    base = VOLFILTER_SIGNAL[-1][1]
+    for pname, pcfg, seed_key in VOLFILTER_PORTFOLIO:
+        full = dict(base, **pcfg)
+        if seed_key is None:
+            print(f"\n▶ {pname}")
+            port_rows.append({"設定": pname, **ckpt.get(
+                f"port|{pname}", lambda: portfolio_stats(usable, sector_map, args.years, **full))})
+            continue
+        res = []
+        for seed in range(args.seeds):
+            print(f"\n▶ {pname} seed={seed}")
+            seeded = dict(full, **{seed_key: seed})
+            res.append(ckpt.get(f"port|{pname}|{seed}",
+                                lambda: portfolio_stats(usable, sector_map, args.years, **seeded)))
+        rk = pd.DataFrame(res).apply(pd.to_numeric, errors="coerce")
+        port_rows.append({"設定": f"{pname}，{args.seeds} 組平均", **{c: round(rk[c].mean(), 2) for c in rk.columns}})
+        port_rows.append({"設定": f"{pname}，最差 / 最好報酬(%)",
+                          "真實總報酬(%)": f"{rk['真實總報酬(%)'].min():.1f} / {rk['真實總報酬(%)'].max():.1f}"})
+
+    sig_df, port_df = pd.DataFrame(sig_rows), pd.DataFrame(port_rows)
+    year_df = pd.DataFrame(yearly)
+    year_df.index.name = "訊號年份"
+    d_r = sig_rows[len(VOLFILTER_SIGNAL) - 1]["平均R"]
+    beaten = (rs["平均R"] < d_r).mean() * 100
+    verdict = (f"D 的平均 R ({d_r}) 贏過 {beaten:.0f}% 的隨機進場對照組"
+               f"（對照組平均 {rs['平均R'].mean():.3f}，標準差 {rs['平均R'].std():.3f}）。")
+
+    os.makedirs(args.out, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+    path = os.path.join(args.out, f"compare_volfilter_{stamp}.md")
+    first = min(df.index.min() for df in data.values()).date()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# 爆量過濾實驗結果 ({stamp})\n\n")
+        f.write(f"- 研究期：{first} ~ {HOLDOUT_START} 之前（考試期未使用）\n")
+        f.write(f"- 板塊：{'、'.join(sectors)}；有效標的 {len(data)} 檔\n")
+        f.write(f"- 爆量上限：訊號日成交量 ÷ 20 日均量 ≤ {VOL_SURGE_CAP}（門檻是看研究期資料挑的，研究期內的改善會偏樂觀）\n")
+        f.write(f"- 全部使用實盤真實模式；基本參數：{BASE_PARAMS}\n\n")
+        f.write("## 訊號層（每個訊號獨立計算，不受資金限制）\n\n" + sig_df.to_markdown(index=False) + "\n\n")
+        f.write(f"- **{verdict}**\n\n")
+        f.write("### 各年度訊號平均 R\n\n" + year_df.to_markdown() + "\n\n")
+        f.write("## 組合層（資金、持倉、產業上限、市場環境過濾後）\n\n" + port_df.to_markdown(index=False) + "\n")
+
+    print("\n" + "=" * 60)
+    print("訊號層：\n" + sig_df.to_string(index=False))
+    print("\n各年度訊號平均 R：\n" + year_df.to_string())
+    print("\n組合層：\n" + port_df.to_string(index=False))
+    print("\n" + verdict)
+    print(f"\n結果已存到 {path}")
+
+
 def run_portfolio_suite(args, data, usable, sector_map, sectors):
     holdout_ts = pd.Timestamp(HOLDOUT_START)
     market = fetch_stock_data("0050.TW", days=args.years * 365)
@@ -198,11 +345,20 @@ def signal_level_stats(data, sector_map, **cfg):
 
 
 def portfolio_stats(tickers, sector_map, years, **cfg):
-    _, stats, _ = run_portfolio_backtest(
-        tickers=tickers, years=years, sector_map=sector_map, period="in_sample", **{**BASE_PARAMS, **cfg})
+    # Windows 上多進程偶爾會有子進程意外結束 (BrokenProcessPool)，重試即可，不必整個實驗重來
+    for attempt in range(3):
+        try:
+            _, stats, _ = run_portfolio_backtest(
+                tickers=tickers, years=years, sector_map=sector_map, period="in_sample", **{**BASE_PARAMS, **cfg})
+            break
+        except BrokenProcessPool:
+            if attempt == 2:
+                raise
+            print(f"⚠️ 子進程意外結束，重試第 {attempt + 2} 次")
     if not stats:
         return {}
-    keep = ["總交易次數", "勝率(%)", "Portfolio期望值(R)", "真實總報酬(%)", "真實最大回撤(%)", "夏普值(Sharpe)"]
+    keep = ["總交易次數", "勝率(%)", "Portfolio期望值(R)", "真實總報酬(%)", "真實最大回撤(%)",
+            "逐日盯市最大回撤(%)", "夏普值(Sharpe)"]
     return {k: stats.get(k) for k in keep}
 
 
@@ -212,7 +368,7 @@ def main():
     ap.add_argument("--years", type=int, default=12, help="抓取的資料年數")
     ap.add_argument("--seeds", type=int, default=10, help="隨機對照組的種子數")
     ap.add_argument("--out", default="research_results", help="結果輸出資料夾")
-    ap.add_argument("--suite", default="baseline", choices=list(SUITES) + ["portfolio"], help="實驗組")
+    ap.add_argument("--suite", default="baseline", choices=list(SUITES) + ["portfolio", "volfilter"], help="實驗組")
     args = ap.parse_args()
 
     industry, _, _ = load_data()
@@ -243,6 +399,9 @@ def main():
 
     if args.suite == "portfolio":
         run_portfolio_suite(args, data, usable, sector_map, sectors)
+        return
+    if args.suite == "volfilter":
+        run_volfilter_suite(args, data, usable, sector_map, sectors)
         return
 
     sig_rows, port_rows = [], []

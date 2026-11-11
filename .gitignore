@@ -13,3 +13,6 @@ smc_system.db
 
 # é‡‘é‘°
 .env
+
+# ¹êÅç¶i«×ÀÉ
+research_results/_*_progress.json

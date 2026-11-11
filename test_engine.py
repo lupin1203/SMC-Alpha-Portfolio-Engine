@@ -416,3 +416,13 @@ class TestDataProvider(unittest.TestCase):
                 self.assertEqual(data_provider.latest_local_date("9999.TW"), idx[-1])
             finally:
                 os.chdir(cwd)
+
+class TestVolSurgeFilter(unittest.TestCase):
+    def test_max_vol_surge_removes_only_high_volume_signals(self):
+        df = _random_walk(seed=3)
+        base = dict(gap_pct=0.3, use_sma=False, bt_mode="移動停利", bt_val=10.0, realistic=True)
+        all_trades = portfolio_engine._pure_calc_worker("T.TW", df.copy(), **base)
+        capped = portfolio_engine._pure_calc_worker("T.TW", df.copy(), max_vol_surge=1.2, **base)
+        self.assertGreater((all_trades['Alpha動能分數'] > 1.2).sum(), 0, "測試資料應該要有爆量訊號")
+        # 前 20 根 K 棒還沒有 20 日均量 (爆量倍數為 NaN)，那些訊號不會被過濾，所以用「沒有任何一筆超過」來檢查
+        self.assertFalse((capped['Alpha動能分數'] > 1.2).any())
