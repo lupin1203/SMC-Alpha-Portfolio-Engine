@@ -3,10 +3,8 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import concurrent.futures
 import logging
 import requests
-import datetime
 import os
 st.set_page_config(page_title="SMC 量化拷問終端 V19.0", layout="wide")
 # --- 新增工具函數 ---
@@ -42,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 from data_provider import load_data, fetch_stock_data
 from strategy import apply_smc_logic
-from backtest_engine import run_backtest_core
-from database import init_db, save_backtest_record, load_history, save_backtest_records_batch
+from backtest_engine import run_backtest_core, summarize_trades
+from database import init_db, save_backtest_record, load_history
 from monte_carlo import run_monte_carlo
 from portfolio_engine import run_portfolio_backtest
 from regime import ALL_REGIMES, DEFAULT_ALLOWED_REGIMES, add_regime_columns
@@ -99,8 +97,14 @@ with tab1:
         live_equity = st.number_input("實盤帳戶總淨值 (NTD)", value=100000, step=5000)
         live_risk_pct = st.number_input("今日單筆風險 (%)", value=0.5, step=0.1) / 100.0
     with col_risk2:
-        min_momentum = st.number_input("最低動能要求 (倍)", value=2.0, step=0.5)
+        min_momentum = st.number_input("最低動能要求 (倍)", value=2.0, step=0.5,
+                                       help="當天成交量 ÷ 20 日均量。")
+        max_momentum = st.number_input("最高動能上限 (倍，0 = 不限)", value=0.0, step=0.1,
+                                       help="研究結果：爆量倍數最高的 20% (約 > 1.9 倍) 訊號表現最差。想排除就填 1.9。")
         min_rr = st.number_input("最低預期賠率 (R)", value=2.0, step=0.5)
+    if min_momentum >= 1.9:
+        st.warning("注意：目前「最低動能要求」≥ 1.9 倍，等於只挑爆量最大的訊號。"
+                   "研究期的結果顯示這一群訊號平均表現最差 (見 README 第十節)，請確認這是你要的設定。")
     with col_risk3:
         max_capital_per_trade = st.number_input("單筆資金佔比上限 (%)", value=20.0, step=5.0) / 100.0
         r_regimes = st.multiselect("允許進場環境", ALL_REGIMES, default=list(DEFAULT_ALLOWED_REGIMES), key="r_regimes",
@@ -126,7 +130,16 @@ with tab1:
             
         with st.spinner("正在檢查大盤宏觀環境..."):
             m_data = fetch_stock_data("0050.TW", days=450)
-            if m_data is not None and not m_data.empty:
+            if m_data is None or m_data.empty:
+                st.warning("抓不到 0050 大盤資料，本次掃描無法檢查市場環境。")
+            else:
+                # 本機快取不會自動更新：資料太舊的話，「今天的訊號」其實是好幾天前的
+                data_age_days = (pd.Timestamp.now().normalize() - m_data.index[-1].normalize()).days
+                if data_age_days > 4:
+                    st.error(f"K 線資料最後一天是 {m_data.index[-1].date()}（{data_age_days} 天前）。"
+                             "請先執行 `python update_data.py` 更新資料，否則掃到的不是今天的訊號。")
+                    st.stop()
+                st.caption(f"資料日期：{m_data.index[-1].date()}（掃描的是這一天收盤後的訊號）")
                 m_data = add_regime_columns(m_data)
                 m_close = m_data['Close'].iloc[-1]
                 m_change = (m_close / m_data['Close'].iloc[-2] - 1) * 100
@@ -140,6 +153,7 @@ with tab1:
                     st.warning(f"市場恐慌警告：今日大盤跌幅達 {m_change:.2f}%，建議放棄所有新掛單。")
 
         radar_results = []
+        scan_errors = []
         progress_bar = st.progress(0)
         
         with st.spinner(f"正在掃描 {len(target_tickers)} 檔標的..."):
@@ -165,12 +179,15 @@ with tab1:
                     if last_row['FVG']:
                         vol_ma20 = df['Volume'].rolling(20).mean().iloc[-1]
                         vol_surge = safe_divide(df['Volume'].iloc[-1], vol_ma20)
-                        entry_price = last_row['Low']
+                        # 進場價 = 訊號日收盤價 (隔天掛觸價單)，停損 = 觸價 − 風險距。
+                        # 和回測的「實盤真實模式」(next_stop) 完全同一套算法，回測才對得上實盤。
+                        entry_price = last_row['Close']
                         sl_price = entry_price - last_row['adjusted_risk']
                         tp_price = entry_price * 1.10
                         rr_ratio = safe_divide((tp_price - entry_price), last_row['adjusted_risk'])
-                        
-                        if vol_surge >= min_momentum and rr_ratio >= min_rr:
+                        momentum_ok = vol_surge >= min_momentum and (max_momentum <= 0 or vol_surge <= max_momentum)
+
+                        if momentum_ok and rr_ratio >= min_rr:
                             risk_amount = live_equity * live_risk_pct
                             risk_per_share = max(entry_price - sl_price, 0.01) 
                             recommended_shares = int(risk_amount / risk_per_share)
@@ -202,7 +219,7 @@ with tab1:
                                 f"*標的*：{ticker} ({INDUSTRY_DICT_REVERSE.get(ticker, '其他')})\n"
                                 f"*動能*：{vol_surge:.2f}x | *賠率*：{rr_ratio:.1f} R\n"
                                 f"➖➖➖➖➖➖➖➖\n"
-                                f"*進場掛單*：`{entry_price:.2f}`\n"
+                                f"*觸價買進*：`{entry_price:.2f}`\n"
                                 f"*防彈止損*：`{sl_price:.2f}`\n"
                                 f"*獲利目標*：`{tp_price:.2f}`\n"
                                 f"*建議買入股數*：`{recommended_shares}` 股\n"
@@ -211,10 +228,16 @@ with tab1:
                             send_telegram_async(tg_msg)
                             
                 except Exception as e:
+                    # 不要靜靜吞掉：記下來，掃描結束後告訴使用者有幾檔失敗
+                    logger.warning(f"掃描 {ticker} 失敗: {e}")
+                    scan_errors.append(ticker)
                     continue
 
         progress_bar.empty()
-        
+        if scan_errors:
+            st.warning(f"有 {len(scan_errors)} 檔掃描失敗（已略過）：{'、'.join(scan_errors[:10])}"
+                       + (" …" if len(scan_errors) > 10 else "") + "。詳細原因見終端機紀錄。")
+
         if radar_results:
             radar_df = pd.DataFrame(radar_results).sort_values("動能分數", ascending=False)
             st.success(f"掃描完成！發現 {len(radar_df)} 檔完美目標。")
@@ -227,9 +250,10 @@ with tab1:
             }).map(lambda x: "background-color: #004d40; color: white;", subset=['動能分數', '建議買入股數'])
             
             st.dataframe(styled_df, hide_index=True, use_container_width=True)
-            st.info("操作建議：請直接打開券商 App，依照「建議買入股數」與「進場掛單價」進行限價掛單。")
+            st.info("操作建議：隔天在券商 App 掛「觸價買進單」，觸發價用「進場價」、股數用「建議買入股數」。"
+                    "價格沒有漲到觸發價就不成交，當天收盤後取消。（和回測的實盤真實模式同一套做法）")
         else:
-            st.warning(f"今日收盤無符合嚴格條件的標的。今日空手，享受生活保護資金！")
+            st.warning("今日收盤無符合嚴格條件的標的。今日空手，享受生活保護資金！")
 
 # ==========================================
 #  分頁 2：單股深度回測實驗室
@@ -255,32 +279,46 @@ with tab2:
     bt_gap = col_b1.number_input("最小缺口(%)", value=0.3, step=0.1, key="b_g")
     bt_sma = col_b2.checkbox("啟用季線濾網", value=True, key="b_s")
     fee_disc = col_b3.number_input("手續費折讓", value=0.28, key="b_f")
-    slippage_pct = col_b4.number_input("滑價(%)", value=0.1, step=0.05, key="b_slip")
-    min_vol = col_b5.number_input("最低成交量", value=1000, step=500, key="b_vol2")
+    slippage_input = col_b4.number_input("滑價(%)", value=0.2, step=0.05, key="b_slip")
+    slippage_pct = slippage_input / 100.0   # 介面填的是百分比 (0.2 = 0.2%)，引擎吃的是比例 (0.002)
+    bt_realistic = col_b5.checkbox("實盤真實模式", value=True, key="b_real",
+                                   help="隔日觸價進場、漲停買不到、跌停賣不掉、保護期、期末結算。研究時建議一律開啟。")
     oos_ratio = col_b6.slider("樣本外比例(%)", 10, 50, 30, step=10, key="b_oos")
 
-    col_btn1, col_btn2 = st.columns(2)
-    run_normal = col_btn1.button("執行科學回測 (含 Monte Carlo)", type="primary", use_container_width=True)
-    run_heatmap = col_btn2.button("執行參數壓力測試 (Heatmap)", use_container_width=True)
+    run_normal = st.button("執行科學回測 (含 Monte Carlo)", type="primary", use_container_width=True)
+    st.caption("參數壓力測試 (熱力圖) 在「防禦與衰減檢定」分頁。")
 
     df_raw = fetch_stock_data(bt_t, days=bt_years * 365)
 
-    if run_normal and not df_raw.empty:
+    if run_normal and (df_raw is None or df_raw.empty):
+        st.error(f"抓不到 {bt_t} 的 K 線資料。")
+    elif run_normal:
+        # 這裡切的是同一檔股票的前段 / 後段，只用來看參數在後段會不會失效；
+        # 最後段可能落在 config.HOLDOUT_START 之後的考試期，請不要拿這裡的結果反覆調參數。
         df = apply_smc_logic(df_raw.copy(), bt_gap, bt_sma, use_vol_filter=bt_vol, use_atr_filter=bt_atr, use_bos_filter=bt_bos)
         split_idx = int(len(df) * (1 - oos_ratio/100))
-        df_is, df_oos = df.iloc[:split_idx], df.iloc[split_idx:]
-        
-        df_is_res, t_is, w_is, exp_is, mdd_is, sharpe_is = run_backtest_core(df_is, bt_mode, bt_val, slippage_pct, fee_disc, 0.003, min_vol)
-        df_oos_res, t_oos, w_oos, exp_oos, mdd_oos, sharpe_oos = run_backtest_core(df_oos, bt_mode, bt_val, slippage_pct, fee_disc, 0.003, min_vol)
-        
-        st.markdown(f"### OOS 盲測對比")
+        df_is, df_oos = df.iloc[:split_idx].copy(), df.iloc[split_idx:].copy()
+
+        df_is_res, _ = run_backtest_core(df_is, bt_mode, bt_val, slippage_pct, fee_disc, 0.003, realistic=bt_realistic)
+        df_oos_res, _ = run_backtest_core(df_oos, bt_mode, bt_val, slippage_pct, fee_disc, 0.003, realistic=bt_realistic)
+        s_is, s_oos = summarize_trades(df_is_res), summarize_trades(df_oos_res)
+
+        st.markdown("### OOS 盲測對比")
         c_is, c_oos = st.columns(2)
-        with c_is:
-            st.success(f"**訓練期 (IS)**: {exp_is:.2f} R")
-            st.write(f"夏普值: {sharpe_is:.2f}")
-        with c_oos:
-            st.warning(f"**盲測期 (OOS)**: {exp_oos:.2f} R")
-            st.write(f"夏普值: {sharpe_oos:.2f}")
+        for col, label, s in ((c_is, "訓練期 (IS)", s_is), (c_oos, "盲測期 (OOS)", s_oos)):
+            with col:
+                st.markdown(f"**{label}**")
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("期望值", f"{s['expectancy']:.2f} R")
+                k2.metric("交易次數", s['trades'])
+                k3.metric("勝率", f"{s['win_rate'] * 100:.1f} %")
+                k4.metric("最大回撤", f"{s['max_dd_r']:.1f} R")
+        if s_oos['trades'] < 20:
+            st.caption(f"盲測期只有 {s_oos['trades']} 筆交易，樣本太少，數字只能參考。")
+
+        # 存進歷史戰績資料庫 (Tab 4)：記錄盲測期的結果
+        save_backtest_record(bt_t, bt_gap, bt_val, s_oos['expectancy'], s_oos['win_rate'] * 100,
+                             s_oos['max_dd_r'], s_oos['total_r'])
 
         st.markdown("### 盲測期 (OOS) 真實交易明細")
         if not df_oos_res.empty:
@@ -402,7 +440,8 @@ with tab3:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("期末總淨值", f"NT$ {p_stats.get('期末總淨值(NTD)', 0):,}")
         m2.metric("真實總報酬", f"{p_stats.get('真實總報酬(%)', 0)} %")
-        m3.metric("最大回撤 (MDD)", f"-{p_stats.get('真實最大回撤(%)', 0)} %")
+        m3.metric("最大回撤 (逐日盯市)", f"-{p_stats.get('逐日盯市最大回撤(%)', p_stats.get('真實最大回撤(%)', 0))} %",
+                  help=f"含持倉中的浮動虧損。只看已實現損益的舊算法是 -{p_stats.get('真實最大回撤(%)', 0)} %，會低估回撤。")
         
         # 夏普值根據好壞給予顏色提示
         sharpe_val = p_stats.get('夏普值(Sharpe)', 0)
@@ -423,7 +462,7 @@ with tab3:
         t4.metric("平均 R 倍數", f"{p_stats.get('平均R倍數', 0)} R")
         t5.metric("總成交 / 淘汰", f"{p_stats.get('總交易次數', 0)} / {p_stats.get('風控與資金不足淘汰次數', 0)}")
 
-        st.subheader(f"資金曲線對決：SMC 策略 vs 0050 大盤")
+        st.subheader("資金曲線對決：SMC 策略 vs 0050 大盤")
         fig_p = go.Figure()
         
         fig_p.add_trace(go.Scatter(x=p_df['出場日期'], y=p_df['交易後總淨值'], mode='lines', name='SMC 策略 (真資金)', line=dict(color='cyan', width=2)))
@@ -599,6 +638,7 @@ with tab5:
     st.markdown("我們將針對**「移動停利 (RR)」**與**「最小缺口 (Gap%)」**進行 3x3 網格交叉測試 (Grid Search)。尋找一片綠色的「高原」，避免紅綠交錯的過度最佳化「孤峰」。")
     
     with st.expander("啟動參數高原壓力測試 (使用快取核心加速)"):
+        st.caption(f"熱力圖只用研究期 (< {HOLDOUT_START}) 的資料，不會動到考試期。")
         st.warning("**運算警告：** 這將連續呼叫 9 次投資組合回測！因為我們已經換上快取(Cache)代理，速度會大幅提升，但仍建議先以【單一板塊】進行抽樣測試。")
         
         r_sec = st.multiselect("選擇抽樣板塊 (建議只選 1 個)", list(INDUSTRY_DICT.keys()), default=[list(INDUSTRY_DICT.keys())[0]], key="r_sec")
@@ -647,7 +687,9 @@ with tab5:
                             sector_map=sector_map, 
                             risk_pct=2.0,         # ✅ 修正：2.0 代表 2% 單筆風險
                             initial_capital=1000000.0,
-                            account_dd_limit=0.20 # ✅ 補上帳戶停機線防呆
+                            account_dd_limit=0.20, # ✅ 補上帳戶停機線防呆
+                            # 挑參數只能用研究期：用全期間的話等於偷看考試期，考試期就失效了
+                            period="in_sample",
                         )
                         
                         if h_stats and not h_df.empty and h_stats.get("真實總報酬(%)", -100.0) != -100.0:

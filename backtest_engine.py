@@ -1,7 +1,6 @@
 # backtest_engine.py
 import numpy as np
 import pandas as pd
-import logging
 
 # 台股漲跌幅限制 10%。資料為還原權息價，除權息日附近比例會有些微誤差，
 # 因此用 9.5% 當門檻判定「漲停 / 跌停」。
@@ -328,13 +327,45 @@ class InstitutionalBacktestEngine:
         return trades_df, df, sharpe_ratio
 
 
+def summarize_trades(trades_df, r_col='真實R'):
+    """
+    把交易明細整理成統計數字，供單股回測、WFO 等共用 (避免各處自己算、算法不一致)。
+    回傳 dict：trades、win_rate (0~1)、expectancy (平均每筆 R)、total_r、max_dd_r (R 為單位的最大回撤，正數)。
+    沒有交易時全部為 0。
+    """
+    empty = {'trades': 0, 'win_rate': 0.0, 'expectancy': 0.0, 'total_r': 0.0, 'max_dd_r': 0.0}
+    if trades_df is None or len(trades_df) == 0 or r_col not in trades_df.columns:
+        return empty
+    r = pd.to_numeric(trades_df[r_col], errors='coerce').dropna().to_numpy(dtype=float)
+    if len(r) == 0:
+        return empty
+    equity = np.concatenate([[0.0], np.cumsum(r)])
+    max_dd = float((np.maximum.accumulate(equity) - equity).max())
+    return {
+        'trades': int(len(r)),
+        'win_rate': float((r > 0).mean()),
+        'expectancy': float(r.mean()),
+        'total_r': float(r.sum()),
+        'max_dd_r': max_dd,
+    }
+
+
 # 🌟 相容轉接器 (相容組合引擎的呼叫)
 def run_backtest_core(df, bt_mode="固定盈虧比", bt_val=3.0, slippage_pct=0.002, fee_disc=0.28, tax_rate=0.003, min_vol=0,
                       realistic=False, **kwargs):
     """
     realistic=True 套用 REALISTIC_PRESET；也可用 kwargs 個別覆寫 REALISM_DEFAULTS 中的選項
     (例如 protection_days=0)。不認得的 kwargs 會被忽略，維持舊版呼叫相容。
+
+    回傳固定 2 個值：(交易明細 DataFrame, 加上淨值欄位的 K 線 DataFrame)。
+    統計數字請用 summarize_trades(交易明細) 取得。
+
+    注意：slippage_pct 是「比例」(0.002 = 0.2%)，不是百分比數字。
+    注意：min_vol 目前只是為了相容舊呼叫而保留，引擎並不會用它過濾 (見 README 已知問題)。
     """
+    if slippage_pct >= 0.05:
+        raise ValueError(
+            f"slippage_pct={slippage_pct} 看起來是百分比數字而不是比例；0.2% 請傳 0.002。")
     actual_fee_rate = 0.001425 * fee_disc
 
     # 向下相容舊版參數名
