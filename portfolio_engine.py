@@ -70,6 +70,12 @@ def _pure_calc_worker(ticker, df_raw, **kwargs):
             **kwargs 
         )
 
+        # 爆量過濾 (實驗用)：訊號日成交量 ÷ 20 日均量 超過上限的訊號不進場。
+        # 放在隨機對照之前，這樣隨機對照組的訊號數量會和過濾後一致。
+        max_vol_surge = kwargs.get('max_vol_surge')
+        if max_vol_surge:
+            df_logic['FVG'] = df_logic['FVG'] & ~(df_logic['Score_VolSurge'] > max_vol_surge)
+
         # 🎲 隨機進場對照組：訊號數量不變、日期隨機
         if kwargs.get('random_entry', False):
             mask = None
@@ -433,6 +439,7 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         "實盤真實模式": "開" if kwargs.get('realistic', False) else "關",
         "排序方式": {"volume_surge": "爆量倍數高優先", "volume_surge_asc": "爆量倍數低優先",
                   "random": f"隨機 (seed={rank_seed})"}[rank_by],
+        "爆量倍數上限": kwargs.get('max_vol_surge') or "不限",
         "隨機進場對照": f"開 (seed={kwargs.get('random_seed', 0)})" if kwargs.get('random_entry', False) else "關",
         "勝率(%)": round(win_rate * 100, 2),
         "Portfolio期望值(R)": round((win_rate * avg_w) - ((1 - win_rate) * avg_l), 2),
