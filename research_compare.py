@@ -21,6 +21,8 @@
             (2) 組合回測：排序方式、市場環境過濾、單筆風險，一次只改一項
   volfilter：排除爆量訊號 (訊號日成交量 ÷ 20 日均量 > 1.9) 有沒有幫助，
             有無季線濾網各測一次，對照組為訊號數相同的隨機進場。
+  diversify：進場固定為「FVG 無季線 + 排除爆量」，比較持有 5 / 10 / 20 / 30 檔、
+            不同單筆風險的組合，並和買進持有 0050 比較。
 
 輸出兩層結果：
   1. 訊號層：每一個訊號都當作獨立交易的平均 R —— 不受資金、持倉上限影響，
@@ -272,6 +274,100 @@ def run_volfilter_suite(args, data, usable, sector_map, sectors):
     print(f"\n結果已存到 {path}")
 
 
+# 分散持有實驗：進場固定為 D（FVG 無季線 + 排除爆量），只改組合層的持倉數與風險。
+# 想法：訊號層有小幅優勢，但 5 檔組合只買到不到 1% 的訊號，結果主要看運氣；
+# 持有更多檔、每筆風險更小，帳戶報酬應該更接近訊號層的平均。
+DIVERSIFY_ENTRY = dict(REALISTIC, use_sma=False, max_vol_surge=VOL_SURGE_CAP)
+# (名稱, 組合層設定)；max_position_pct = 單筆最多佔淨值多少，避免現金被少數幾檔吃光
+DIVERSIFY_PORTFOLIO = [
+    ("5 檔、風險 1.5%（目前設定）", dict(max_concurrent=5, max_per_sector=2, risk_pct=1.5, max_position_pct=0.20)),
+    ("10 檔、風險 0.5%", dict(max_concurrent=10, max_per_sector=3, risk_pct=0.5, max_position_pct=0.10)),
+    ("20 檔、風險 0.3%", dict(max_concurrent=20, max_per_sector=5, risk_pct=0.3, max_position_pct=0.05)),
+    ("30 檔、風險 0.2%", dict(max_concurrent=30, max_per_sector=6, risk_pct=0.2, max_position_pct=0.033)),
+    ("30 檔、風險 0.2%、不過濾市場環境",
+     dict(max_concurrent=30, max_per_sector=6, risk_pct=0.2, max_position_pct=0.033, allowed_regimes=None)),
+]
+# 這兩組再用隨機排序跑幾次，看結果受「同一天挑哪幾檔」的運氣影響多大
+DIVERSIFY_RANK_CHECK = ["20 檔、風險 0.3%", "30 檔、風險 0.2%"]
+
+
+def _buy_hold(ticker, years, start, end):
+    df = fetch_stock_data(ticker, days=years * 365)
+    if df is None or df.empty:
+        return None
+    c = df['Close'][(df.index >= start) & (df.index < end)]
+    if len(c) < 2:
+        return None
+    peak = c.cummax()
+    return {"真實總報酬(%)": round((c.iloc[-1] / c.iloc[0] - 1) * 100, 2),
+            "逐日盯市最大回撤(%)": round(((peak - c) / peak).max() * 100, 2)}
+
+
+def run_diversify_suite(args, data, usable, sector_map, sectors):
+    holdout_ts = pd.Timestamp(HOLDOUT_START)
+    first = min(df.index.min() for df in data.values())
+    last = max(df.index.max() for df in data.values())
+    span_years = (last - first).days / 365.25
+    ckpt = Checkpoint(os.path.join(args.out, "_diversify_progress.json"),
+                      f"{len(data)}|{last.date()}|{args.seeds}|{VOL_SURGE_CAP}|{sorted(sectors)}|{BASE_PARAMS}")
+
+    def run(cfg):
+        return portfolio_stats(usable, sector_map, args.years, **dict(DIVERSIFY_ENTRY, **cfg))
+
+    rows = []
+    for name, cfg in DIVERSIFY_PORTFOLIO:
+        print(f"\n▶ {name}")
+        rows.append({"設定": name, **ckpt.get(f"port|{name}", lambda: run(cfg))})
+
+    for name in DIVERSIFY_RANK_CHECK:
+        cfg = dict(DIVERSIFY_PORTFOLIO)[name]
+        res = []
+        for seed in range(args.seeds):
+            print(f"\n▶ {name}，隨機排序 seed={seed}")
+            seeded = dict(cfg, rank_by="random", rank_seed=seed)
+            res.append(ckpt.get(f"rank|{name}|{seed}", lambda: run(seeded)))
+        rk = pd.DataFrame(res).apply(pd.to_numeric, errors="coerce")
+        rows.append({"設定": f"{name}，隨機排序 {args.seeds} 組平均", **{c: round(rk[c].mean(), 2) for c in rk.columns}})
+        rows.append({"設定": f"{name}，隨機排序 最差 / 最好報酬(%)",
+                     "真實總報酬(%)": f"{rk['真實總報酬(%)'].min():.1f} / {rk['真實總報酬(%)'].max():.1f}"})
+
+    # 對照：同樣 30 檔分散，但進場日期隨機 (訊號數相同)
+    rnd_cfg = dict(DIVERSIFY_PORTFOLIO)["30 檔、風險 0.2%"]
+    res = []
+    for seed in range(args.seeds):
+        print(f"\n▶ 隨機進場，30 檔 seed={seed}")
+        seeded = dict(rnd_cfg, random_entry=True, random_seed=seed)
+        res.append(ckpt.get(f"rand30|{seed}", lambda: run(seeded)))
+    rk = pd.DataFrame(res).apply(pd.to_numeric, errors="coerce")
+    rows.append({"設定": f"隨機進場，30 檔、風險 0.2%，{args.seeds} 組平均", **{c: round(rk[c].mean(), 2) for c in rk.columns}})
+    rows.append({"設定": "隨機進場，30 檔 最差 / 最好報酬(%)",
+                 "真實總報酬(%)": f"{rk['真實總報酬(%)'].min():.1f} / {rk['真實總報酬(%)'].max():.1f}"})
+
+    bh = _buy_hold("0050.TW", args.years, first, holdout_ts)
+    if bh:
+        rows.append({"設定": "買進持有 0050（同期間）", **bh})
+
+    df = pd.DataFrame(rows)
+    ret = pd.to_numeric(df["真實總報酬(%)"], errors="coerce")
+    df.insert(df.columns.get_loc("真實總報酬(%)") + 1, "年化報酬(%)",
+              (((1 + ret / 100) ** (1 / span_years) - 1) * 100).round(2))
+
+    os.makedirs(args.out, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+    path = os.path.join(args.out, f"compare_diversify_{stamp}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# 分散持有實驗結果 ({stamp})\n\n")
+        f.write(f"- 研究期：{first.date()} ~ {HOLDOUT_START} 之前（約 {span_years:.1f} 年，考試期未使用）\n")
+        f.write(f"- 板塊：{'、'.join(sectors)}；有效標的 {len(data)} 檔\n")
+        f.write(f"- 進場固定：FVG 無季線 + 排除爆量 (> {VOL_SURGE_CAP} 倍)，實盤真實模式\n")
+        f.write("- 只改組合層：同時持倉數、單筆風險、單筆資金上限、同產業上限\n")
+        f.write(f"- 其他參數：{BASE_PARAMS}\n\n")
+        f.write(df.to_markdown(index=False) + "\n")
+    print("\n" + "=" * 60)
+    print(df.to_string(index=False))
+    print(f"\n結果已存到 {path}")
+
+
 def run_portfolio_suite(args, data, usable, sector_map, sectors):
     holdout_ts = pd.Timestamp(HOLDOUT_START)
     market = fetch_stock_data("0050.TW", days=args.years * 365)
@@ -368,7 +464,7 @@ def main():
     ap.add_argument("--years", type=int, default=12, help="抓取的資料年數")
     ap.add_argument("--seeds", type=int, default=10, help="隨機對照組的種子數")
     ap.add_argument("--out", default="research_results", help="結果輸出資料夾")
-    ap.add_argument("--suite", default="baseline", choices=list(SUITES) + ["portfolio", "volfilter"], help="實驗組")
+    ap.add_argument("--suite", default="baseline", choices=list(SUITES) + ["portfolio", "volfilter", "diversify"], help="實驗組")
     args = ap.parse_args()
 
     industry, _, _ = load_data()
@@ -402,6 +498,9 @@ def main():
         return
     if args.suite == "volfilter":
         run_volfilter_suite(args, data, usable, sector_map, sectors)
+        return
+    if args.suite == "diversify":
+        run_diversify_suite(args, data, usable, sector_map, sectors)
         return
 
     sig_rows, port_rows = [], []
