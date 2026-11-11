@@ -1,6 +1,5 @@
 # monte_carlo.py
 import numpy as np
-import pandas as pd
 import logging
 
 def run_monte_carlo(trades_df, num_simulations=1000, ruin_drawdown_pct=30.0, starting_capital=100.0, risk_per_trade_pct=2.0):

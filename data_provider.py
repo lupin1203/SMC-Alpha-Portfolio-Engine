@@ -1,6 +1,5 @@
 import yfinance as yf
 import pandas as pd
-import requests
 import datetime
 import logging
 import time
@@ -40,8 +39,33 @@ def load_data(use_local_scan=True):
         logging.error(f"資料載入失敗: {e}")
         return DEFAULT_INDUSTRY_DICT, DEFAULT_STOCK_NAMES, DEFAULT_SEARCH_LIST
 
+def split_ticker(ticker_str):
+    """'2330.TW' → ('2330', 'TW')；'6488.TWO' → ('6488', 'TWO')；沒有後綴時預設上市 (.TW)。"""
+    parts = str(ticker_str).strip().split(".")
+    suffix = parts[1].upper() if len(parts) > 1 and parts[1] else "TW"
+    return parts[0], suffix
+
+
+def latest_local_date(ticker_str="0050.TW"):
+    """本機快取裡這檔股票最後一根 K 線的日期；沒有快取回傳 None。用來檢查資料是不是太舊。"""
+    stock_id, _ = split_ticker(ticker_str)
+    local_path = f"./local_data/{stock_id}.parquet"
+    if not os.path.exists(local_path):
+        return None
+    try:
+        idx = pd.to_datetime(pd.read_parquet(local_path, columns=[]).index)
+        return idx.max().tz_localize(None) if idx.tz is not None else idx.max()
+    except Exception as e:
+        logging.warning(f"讀取本地緩存日期失敗 {stock_id}: {e}")
+        return None
+
+
 def fetch_stock_data(ticker_str, days):
-    stock_id = str(ticker_str).split(".")[0]
+    """
+    讀取 K 線。本機有快取 (./local_data/<代號>.parquet) 就直接用，**不會自動更新**；
+    要最新資料請先執行 python update_data.py。沒有快取才從 yfinance 下載最近 days 天。
+    """
+    stock_id, suffix = split_ticker(ticker_str)
     local_path = f"./local_data/{stock_id}.parquet"
     
     # 🟢 第一防線：從本地 Data Lake 載入
@@ -67,7 +91,7 @@ def fetch_stock_data(ticker_str, days):
     
     # 優先嘗試 yfinance (更為穩定)
     try:
-        stock = yf.Ticker(f"{stock_id}.TW")
+        stock = yf.Ticker(f"{stock_id}.{suffix}")
         df_result = stock.history(period="max", auto_adjust=True)
         if not df_result.empty:
             # 先去掉時區再比較日期 (帶時區的索引不能和一般日期直接比較)

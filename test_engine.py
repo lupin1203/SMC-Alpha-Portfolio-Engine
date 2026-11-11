@@ -303,3 +303,116 @@ class TestRetestEntry(unittest.TestCase):
         rows2 = [(100, 101, 97, 100)] + [(101, 102, 99, 101)] * 3 + [(98, 99, 96, 97)]
         self.assertTrue(_run(self._df(rows2), entry_mode="retest", retest_days=3, close_open_at_end=True).empty)
         self.assertEqual(len(_run(self._df(rows2), entry_mode="retest", retest_days=5, close_open_at_end=True)), 1)
+
+
+# ==========================================
+# 統計、逐日盯市回撤、Walk-Forward、消融實驗 回歸測試
+# ==========================================
+import data_provider
+import walk_forward
+from backtest_engine import run_backtest_core, summarize_trades
+from research_pipeline import QuantResearchPipeline
+
+
+def _random_walk(n=1600, seed=1):
+    """合成個股 K 線：帶一點向上漂移的隨機漫步，足夠產生一些 FVG 訊號。"""
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2015-01-01", periods=n)
+    close = 100 * np.cumprod(1 + rng.normal(0.0005, 0.02, n))
+    open_ = np.r_[close[0], close[:-1]] * (1 + rng.normal(0, 0.005, n))
+    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.006, n)))
+    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.006, n)))
+    return pd.DataFrame({'Open': open_, 'High': high, 'Low': low, 'Close': close,
+                         'Volume': rng.integers(1_000_000, 5_000_000, n).astype(float)}, index=idx)
+
+
+class TestSummarizeTrades(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(summarize_trades(pd.DataFrame())['trades'], 0)
+        self.assertEqual(summarize_trades(None)['expectancy'], 0.0)
+
+    def test_numbers(self):
+        s = summarize_trades(pd.DataFrame({'真實R': [2.0, -1.0, -1.0, 4.0]}))
+        self.assertEqual(s['trades'], 4)
+        self.assertAlmostEqual(s['win_rate'], 0.5)
+        self.assertAlmostEqual(s['expectancy'], 1.0)
+        self.assertAlmostEqual(s['total_r'], 4.0)
+        self.assertAlmostEqual(s['max_dd_r'], 2.0)   # 2 → 1 → 0：從高點回落 2R
+
+    def test_core_returns_two_values_and_rejects_percent_slippage(self):
+        df = _bars([(100, 101, 99, 100), (100, 110, 99, 109), (109, 110, 108, 109)], signal_at=[0])
+        res = run_backtest_core(df.copy(), "固定盈虧比", 3.0, 0.002)
+        self.assertEqual(len(res), 2)
+        with self.assertRaises(ValueError):
+            run_backtest_core(df.copy(), "固定盈虧比", 3.0, 0.1)   # 0.1 = 10%，一定是把百分比當比例傳
+
+
+class TestMarkToMarket(unittest.TestCase):
+    def test_open_loss_shows_up_in_equity(self):
+        idx = pd.bdate_range("2024-01-01", periods=5)
+        close = pd.Series([100.0, 80.0, 70.0, 95.0, 110.0], index=idx)
+        pos = [{'ticker': 'A', 'entry_date': idx[0], 'exit_date': idx[4], 'shares': 100,
+                'entry_price': 100.0, 'net_profit': 1000.0}]
+        eq = portfolio_engine.mark_to_market_equity(pos, {'A': close}, 100000.0)
+        self.assertAlmostEqual(eq[idx[0]], 100000.0)
+        self.assertAlmostEqual(eq[idx[2]], 97000.0)      # 持倉中浮虧 30 × 100 股
+        self.assertAlmostEqual(eq[idx[4]], 101000.0)     # 出場後只剩已實現損益
+        dd = ((eq.cummax() - eq) / eq.cummax()).max()
+        self.assertAlmostEqual(dd, 0.03)                 # 只看已實現損益的話回撤會是 0
+
+    def test_missing_price_falls_back_to_realized(self):
+        idx = pd.bdate_range("2024-01-01", periods=3)
+        pos = [{'ticker': 'X', 'entry_date': idx[0], 'exit_date': idx[2], 'shares': 10,
+                'entry_price': 50.0, 'net_profit': -200.0}]
+        eq = portfolio_engine.mark_to_market_equity(pos, {}, 1000.0)
+        self.assertAlmostEqual(eq.iloc[0], 1000.0)
+        self.assertAlmostEqual(eq.iloc[-1], 800.0)
+        self.assertTrue(portfolio_engine.mark_to_market_equity([], {}, 1000.0).empty)
+
+
+class TestWalkForward(unittest.TestCase):
+    def test_runs_and_returns_three_values(self):
+        df = _random_walk()
+        trades, logs, stats = walk_forward.run_wfo(df, train_years=2, test_years=1, use_sma_filter=False)
+        self.assertEqual(len(logs), 4)   # 1600 根：(1600 − 504) // 252 = 4 段盲測
+        if stats is not None:
+            self.assertEqual(stats['總交易次數'], len(trades))
+            # 盲測交易的訊號日一定落在第一段訓練期之後
+            self.assertTrue((pd.to_datetime(trades['訊號日']) >= df.index[504]).all())
+
+    def test_not_enough_data(self):
+        trades, logs, stats = walk_forward.run_wfo(_random_walk(n=300))
+        self.assertTrue(trades.empty)
+        self.assertIsNone(stats)
+
+
+class TestResearchPipeline(unittest.TestCase):
+    def test_ablation_switches_actually_change_signals(self):
+        report = QuantResearchPipeline(_random_walk()).run_ablation_study({'min_gap_pct': 0.3})
+        self.assertEqual(len(report), 16)
+        # 濾網全開的訊號數一定少於全關；如果參數名寫錯被策略忽略，兩者會一樣
+        all_on = report[report[['use_sma_filter', 'use_bos_filter', 'use_vol_filter', 'use_atr_filter']].all(axis=1)]
+        all_off = report[~report[['use_sma_filter', 'use_bos_filter', 'use_vol_filter', 'use_atr_filter']].any(axis=1)]
+        self.assertLess(all_on['訊號數'].iloc[0], all_off['訊號數'].iloc[0])
+        self.assertGreater(report['訊號數'].nunique(), 4)
+
+
+class TestDataProvider(unittest.TestCase):
+    def test_split_ticker(self):
+        self.assertEqual(data_provider.split_ticker("2330.TW"), ("2330", "TW"))
+        self.assertEqual(data_provider.split_ticker("6488.two"), ("6488", "TWO"))
+        self.assertEqual(data_provider.split_ticker("2330"), ("2330", "TW"))
+
+    def test_latest_local_date(self):
+        idx = pd.bdate_range("2024-01-01", periods=5)
+        df = pd.DataFrame({'Open': 1.0, 'High': 1.0, 'Low': 1.0, 'Close': 1.0, 'Volume': 1.0}, index=idx)
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                os.chdir(d)
+                self.assertIsNone(data_provider.latest_local_date("9999.TW"))
+                os.makedirs("local_data")
+                df.to_parquet("local_data/9999.parquet")
+                self.assertEqual(data_provider.latest_local_date("9999.TW"), idx[-1])
+            finally:
+                os.chdir(cwd)

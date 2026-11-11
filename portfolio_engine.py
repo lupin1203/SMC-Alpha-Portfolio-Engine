@@ -11,6 +11,42 @@ from config import HOLDOUT_START
 from data_provider import fetch_stock_data
 from regime import add_regime_columns, regime_at, DEFAULT_ALLOWED_REGIMES
 
+def mark_to_market_equity(positions, close_dict, initial_capital):
+    """
+    逐日盯市淨值曲線：已實現損益 + 持倉中部位的浮動損益 (用每天收盤價計算)。
+    只看已實現損益的話，持倉期間的浮虧完全看不到，會低估最大回撤。
+
+    positions: list of dict，每筆需要 ticker / entry_date / exit_date / shares / entry_price / net_profit
+    close_dict: {ticker: 收盤價 Series (DatetimeIndex)}
+    回傳以交易日為索引的淨值 Series。
+    """
+    if not positions:
+        return pd.Series(dtype=float)
+    dates = set()
+    for p in positions:
+        entry, exit_ = pd.Timestamp(p['entry_date']), pd.Timestamp(p['exit_date'])
+        dates.update([entry, exit_])
+        close = close_dict.get(p['ticker'])
+        if close is not None:
+            dates.update(close.index[(close.index >= entry) & (close.index <= exit_)])
+    calendar = pd.DatetimeIndex(sorted(dates))
+    equity = pd.Series(float(initial_capital), index=calendar)
+
+    for p in positions:
+        entry, exit_ = pd.Timestamp(p['entry_date']), pd.Timestamp(p['exit_date'])
+        equity[calendar >= exit_] += p['net_profit']
+        close = close_dict.get(p['ticker'])
+        if close is None:
+            continue
+        holding = calendar[(calendar >= entry) & (calendar < exit_)]
+        if len(holding) == 0:
+            continue
+        px = close[~close.index.duplicated()].sort_index().reindex(holding, method='ffill')
+        unrealized = ((px - p['entry_price']) * p['shares']).fillna(0.0)
+        equity[holding] += unrealized.to_numpy()
+    return equity
+
+
 # 🌟 透過 **kwargs 無腦接收所有 UI 參數
 def _pure_calc_worker(ticker, df_raw, **kwargs):
     try:
@@ -104,9 +140,9 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
     if period not in ('all', 'in_sample', 'holdout'):
         raise ValueError(f"未知的 period: {period}")
     
-    print(f"\n==========================================")
+    print("\n==========================================")
     print(f"⚙️ [組合回測引擎] 啟動！接收 {len(tickers)} 檔標的。")
-    print(f"==========================================")
+    print("==========================================")
 
     risk_decimal = risk_pct / 100.0 
     raw_data_dict = {}
@@ -188,7 +224,8 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         raw_portfolio_df['_rank_key'] = raw_portfolio_df['Alpha動能分數']
     
     actual_taken_trades = []
-    active_positions = [] 
+    mtm_positions = []   # 逐日盯市用：每筆實際成交部位的股數、進場價、進出場日
+    active_positions = []
     
     cash = initial_capital              
     realized_equity = initial_capital   
@@ -301,6 +338,12 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
                     'net_profit': expected_net_profit
                 })
                 
+                mtm_positions.append({
+                    'ticker': trade['標的'], 'entry_date': current_date, 'exit_date': exit_time,
+                    'shares': planned_shares, 'entry_price': trade['進場'],
+                    'net_profit': expected_net_profit,
+                })
+
                 actual_taken_trades.append({
                     '日期': current_date.date(),
                     '出場日期': exit_time.date(),
@@ -330,11 +373,20 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
     
     portfolio_df['真實回撤(%)'] = ((portfolio_df['交易後總淨值'] - portfolio_df['交易後總淨值'].expanding().max()) / portfolio_df['交易後總淨值'].expanding().max()) * 100.0
     max_dd_pct = abs(portfolio_df['真實回撤(%)'].min()) if not portfolio_df['真實回撤(%)'].empty else 0.0
-    
+
+    # 逐日盯市回撤：把持倉中的浮動損益也算進去 (上面的「真實回撤」只看已實現損益，會低估)
+    close_dict = {t: df['Close'] for t, df in raw_data_dict.items()}
+    mtm_equity = mark_to_market_equity(mtm_positions, close_dict, initial_capital)
+    if not mtm_equity.empty:
+        mtm_peak = mtm_equity.cummax()
+        mtm_max_dd_pct = float(((mtm_peak - mtm_equity) / mtm_peak).max() * 100.0)
+    else:
+        mtm_max_dd_pct = max_dd_pct
+
     bm_df = market_df.copy() if market_df is not None else None
     if bm_df is not None and not bm_df.empty:
-        start_date = portfolio_df['日期'].min()
-        end_date = portfolio_df['出場日期'].max()
+        start_date = pd.Timestamp(portfolio_df['日期'].min())
+        end_date = pd.Timestamp(portfolio_df['出場日期'].max())
         bm_df = bm_df.loc[start_date:end_date].copy()
         if not bm_df.empty:
             base_price = bm_df['Close'].iloc[0]
@@ -389,7 +441,8 @@ def run_portfolio_backtest(tickers, years, bt_mode, bt_val, gap_pct, use_sma, sl
         "夏普值(Sharpe)": round(sharpe_ratio, 2),
         "真實總報酬(%)": round(final_return_pct, 2),
         "期末總淨值(NTD)": round(realized_equity, 0),
-        "真實最大回撤(%)": round(max_dd_pct, 2)
+        "真實最大回撤(%)": round(max_dd_pct, 2),          # 只看已實現損益 (舊算法，保留供對照)
+        "逐日盯市最大回撤(%)": round(mtm_max_dd_pct, 2),   # 含持倉浮虧，比較接近實際會經歷的回撤
     }
     
     if is_bankrupt:
